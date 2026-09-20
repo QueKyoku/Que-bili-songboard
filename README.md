@@ -8,7 +8,7 @@
 git clone https://github.com/QueKyoku/Que-bili-songboard.git
 ```
 
-当前版本 **v0.2.1** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
+当前版本 **v0.2.2** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
 `python -m songboard --version` 可以直接问程序自己
 
 给 B 站主播用的点歌工具。观众发一条 `点歌 稻香`，程序就会把这首歌加到网易云的

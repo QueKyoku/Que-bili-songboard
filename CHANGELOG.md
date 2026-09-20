@@ -8,6 +8,28 @@
 > ⚠️ 本项目依赖 B 站弹幕长连接和网易云的**非官方接口**，
 > 接口一改就可能失效。补丁版本里也可能会出现"适应上游变更"的修复。
 
+## [0.2.2] - 2026-09-20
+
+### 修复
+
+- **`启动.bat` 的中文被吃掉（严重）**：文件存的是 UTF-8 无 BOM，里面却写着
+  `chcp 65001`。cmd.exe 读批处理文件是按**当前代码页逐字节解码**的，
+  文件编码和运行时代码页一旦对不上，就会出现「整行被吃掉、后半截当成命令
+  执行」的现象 —— 表现是菜单里的 `[2] 连直播间（需要填房间号）` 整行消失，
+  还冒出一句
+  `'需要填房间号）' is not recognized as an internal or external command`。
+  两个 `.bat` 统一改成 **GBK 编码 + `chcp 936`**（中文 Windows 的原生代码页），
+  读取和输出两端一致，不再在运行中切换代码页。
+- `启动.bat` 里 `[1]` 的文案改为「演示模式（离线看效果；会自己造模拟弹幕，
+  正式开播别用）」—— 原来的说法太含蓄，容易在正式开播时误选，
+  选完还会把 `mode` 写成 `demo` 留在配置里。
+
+### 新增
+
+- `selftest.py` 新增「批处理文件编码」检查：所有 `.bat` 必须是
+  GBK / CRLF / 无 BOM / 不含 `chcp 65001`，并确认菜单里的中文能读出来。
+  故意改回 UTF-8 + `chcp 65001` 会被它拦下。
+
 ## [0.2.1] - 2026-09-20
 
 ### 修复
@@ -100,6 +122,7 @@
 - 网易云的接口是非官方的，可能随官方改动失效。
 - 桥需要每次重新注入（网易云一重启就失效）。
 
+[0.2.2]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/QueKyoku/Que-bili-songboard/releases/tag/v0.1.0
