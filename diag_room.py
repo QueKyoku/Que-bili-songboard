@@ -49,13 +49,22 @@ async def main() -> int:
         for one in rooms[-5:]:
             print(f"           {one.get('nickname')}: {one.get('text')}")
         if not rooms:
-            print("           ⚠️ 历史弹幕也是空的——说明这个房间确实没有弹幕产生，")
-            print("              或者你发弹幕的地方不是这个房间号")
+            print("           ⚠️ 历史弹幕是空的。**别据此判断房间没弹幕** ——")
+            print("              实测这个接口在未登录时经常直接返回空"
+                  "（room 6 这种几十万人的大房间也是 0 条）。")
+            print("              以下面实时连接的结果为准。")
     except Exception as exc:
         print(f"[历史弹幕] 查询失败 {exc!r}")
 
     # 3) 直连弹幕服务器，逐帧打印
-    dm = BilibiliDanmaku(ROOM, lambda ev: asyncio.sleep(0), None)
+    # ⚠️ 必须用**真实房间号**连。实测（room 6，真实号 7734200）：
+    #    用短号 6 连 → AUTH 成功、心跳正常，但服务器**一条弹幕都不推**；
+    #    用 7734200 连 → 20 秒能收到 3～4 条。
+    #    以前这里算出了 real_room 却没用它连，于是对大房间也会得出
+    #    "这个房间确实没有弹幕产生"这种**完全错误**的结论。
+    if real_room != ROOM:
+        print(f"[连接] 房间号 {ROOM} 是短号，改用真实房间号 {real_room} 连接")
+    dm = BilibiliDanmaku(real_room, lambda ev: asyncio.sleep(0), None)
     token, hosts = await dm.fetch_token()
     url = f"wss://{hosts[0]['host']}:{hosts[0].get('wss_port', 443)}/sub"
     print(f"\n[连接] {hosts[0]['host']} / roomid={dm.room_id} token={len(token)}字符")

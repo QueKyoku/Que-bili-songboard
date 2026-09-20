@@ -360,13 +360,33 @@ function renderState(snap){  const cur = snap.current;
 function renderStatus(st){
   const dot = $('#connDot');
   dot.className = 'dot ' + (st.connected ? 'on' : 'off');
-  $('#modeTag').textContent = st.mode === 'demo' ? '演示模式' : '直播间 ' + (st.room_id || '-');
+  const room = st.room || {};
+  // 房间名写进标签里：填错房间号时（填成别人的房间）连接一切正常、
+  // 就是永远收不到弹幕 —— 把房间名亮出来一眼就能看出不对
+  $('#modeTag').textContent = st.mode === 'demo'
+    ? '演示模式'
+    : '直播间 ' + (st.room_id || '-') + (room.title ? '《' + room.title + '》' : '');
   const bits = [];
   bits.push(st.connected ? '已连接弹幕服务器' : '未连接');
-  if (st.mode !== 'demo') bits.push('人气 ' + (st.popularity || 0));
+  if (st.mode !== 'demo' && room.title) {
+    bits.push('房间《' + room.title + '》'
+              + (room.uname ? ' 主播 ' + room.uname : '')
+              + (room.area ? ' · ' + room.area : ''));
+  }
+  if (st.mode !== 'demo') {
+    bits.push(room.live_status === 1 ? '正在直播' : '未开播');
+    bits.push('人气 ' + (st.popularity || 0));
+  }
   bits.push('累计收到弹幕 ' + (st.danmaku_count || 0) + ' 条');
   if (st.mode !== 'demo' && st.connected && !(st.danmaku_count > 0)) {
-    bits.push('⚠️ 已连上但还没收到过弹幕——未开播时是正常的，开播后才有弹幕流');
+    if (room.live_status === 1) {
+      bits.push('⚠️ 房间在播但还没收到弹幕——确认一下发弹幕的房间是不是这个；'
+                + '也可以看控制台顶部的叠加层地址对不对');
+    } else if (Object.keys(room).length) {
+      bits.push('⚠️ 这个房间没在直播——没开播就没有弹幕流，连上了也收不到（不是故障）');
+    } else {
+      bits.push('⚠️ 已连上但还没收到过弹幕——未开播时是正常的，开播后才有弹幕流');
+    }
   }
   if (st.last_error) bits.push('最近错误：' + st.last_error);
   $('#statusLine').textContent = bits.join(' · ');

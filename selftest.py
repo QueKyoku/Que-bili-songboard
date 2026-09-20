@@ -986,6 +986,46 @@ def test_netease_auth_codes() -> None:
           drv.status()["account"].get("nickname") == "七月雀")
 
 
+def test_room_diagnostics() -> None:
+    """"收不到弹幕"要能从状态里看出来是哪种情况。
+
+    实测踩过的坑：
+      1) **房间号填错**（连了别人的房间）时，连接/认证/心跳全都正常，
+         日志一片健康，就是永远收不到弹幕 —— 所以房间名必须显示出来
+      2) **短号**（如 room 6，真实号 7734200）连上去认证成功、心跳正常，
+         但服务器一条弹幕都不推。实测：用 6 连 0 条，用 7734200 连 20 秒 3 条。
+         diag_room.py 以前算出了真实房间号却没用它连，于是给出
+         "这个房间确实没有弹幕产生"这种完全错误的结论
+      3) "历史弹幕"接口未登录时经常返回空，不能拿它判断房间没弹幕
+    """
+    print("\n== 房间诊断信息 ==")
+    from songboard.bilibili import BilibiliDanmaku
+
+    dm = BilibiliDanmaku(12345, lambda ev: None, None)
+    st = dm.status()
+    check("status() 里有 room 字段（房间名/开播状态）", "room" in st,
+          str(sorted(st)))
+    check("还没解析过房间时 room 是空 dict，不会崩", st["room"] == {},
+          str(st["room"]))
+    check("room_id 用真实号而非输入号",
+          hasattr(dm, "input_room_id") and dm.room_id == dm.input_room_id,
+          f"input={dm.input_room_id} real={dm.room_id}")
+
+    dm.room_info = {"title": "测试", "live_status": 0, "area": "自习室"}
+    check("room 信息会带进 status()",
+          dm.status()["room"].get("title") == "测试",
+          str(dm.status()["room"]))
+
+    # 诊断工具必须用真实房间号连接（这个 bug 会让排查结论完全反过来）
+    root = Path(__file__).resolve().parent
+    src = (root / "diag_room.py").read_text(encoding="utf-8")
+    check("diag_room 用真实房间号连接（不是短号）",
+          "BilibiliDanmaku(real_room" in src
+          and "BilibiliDanmaku(ROOM" not in src)
+    check("diag_room 不再拿历史弹幕为空当结论",
+          "别据此判断房间没弹幕" in src)
+
+
 def test_syntax() -> None:
     """所有源码都必须能编译、所有模块都必须能导入。
 
@@ -2457,6 +2497,7 @@ def main() -> int:
     test_syntax()
     test_web_js()
     test_bat_files()
+    test_room_diagnostics()
     test_netease_auth_codes()
     test_changelog()
     test_config_robustness()

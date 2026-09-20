@@ -214,6 +214,8 @@ class BilibiliDanmaku:
         self.last_error = ""
         self._stop = asyncio.Event()
         self._uid = 0
+        #: 房间信息（标题/主播/开播状态/人气），由 resolve_room() 填
+        self.room_info: dict[str, Any] = {}
 
     async def log(self, msg: str) -> None:
         print(f"[danmaku] {msg}")
@@ -230,6 +232,33 @@ class BilibiliDanmaku:
             {"id": self.input_room_id},
         )
 
+    def _room_extra_sync(self) -> dict:
+        """再问一次房间信息：标题、主播名、开播状态、人气。
+
+        为什么要多花这一次请求：**房间号填错**（填成别人的房间）时，
+        连接、认证、心跳全都正常，日志一片健康，就是永远收不到弹幕 ——
+        这是实测最容易让人卡住的一种情况（实测：填了别人的房间，
+        50 秒 0 条弹幕，连历史弹幕接口也是 0 条）。
+        把房间名和开播状态显示出来，一眼就能看出"这不是我的房间"。
+        """
+        try:
+            res = _http_json(
+                "https://api.live.bilibili.com/room/v1/Room/get_info",
+                {"room_id": self.room_id},
+            )
+        except Exception:  # noqa: BLE001
+            return {}
+        if res.get("code") != 0:
+            return {}
+        d = res.get("data") or {}
+        return {
+            "title": str(d.get("title") or ""),
+            "uname": str(d.get("uname") or ""),
+            "live_status": _as_int(d.get("live_status")),
+            "online": _as_int(d.get("online")),
+            "area": str(d.get("area_name") or ""),
+        }
+
     async def resolve_room(self) -> bool:
         try:
             res = await asyncio.to_thread(self._resolve_room_sync)
@@ -242,8 +271,17 @@ class BilibiliDanmaku:
         data = res.get("data") or {}
         self.room_id = int(data.get("room_id") or self.input_room_id)
         self._uid = int(data.get("uid") or 0)
+        self.room_info = await asyncio.to_thread(self._room_extra_sync)
         live = "正在直播" if data.get("live_status") == 1 else "未开播"
-        await self.log(f"房间 {self.room_id}（{live}），主播 uid={self._uid}")
+        title = self.room_info.get("title")
+        who = self.room_info.get("uname")
+        extra = (f"《{title}》" if title else "")
+        if who:
+            extra += f" 主播 {who}"
+        await self.log(f"房间 {self.room_id} {extra}（{live}），主播 uid={self._uid}")
+        if data.get("live_status") != 1:
+            await self.log("⚠️ 这个房间没在直播 —— 没开播就没有弹幕流，"
+                           "连上了也一条都收不到（这是 B 站的机制，不是故障）")
         return True
 
     def _danmu_info_sync(self) -> dict:
@@ -510,6 +548,8 @@ class BilibiliDanmaku:
             "mode": "live", "room_id": self.room_id, "connected": self.connected,
             "ever_connected": self.ever_connected, "popularity": self.popularity,
             "danmaku_count": self.danmaku_count, "last_error": self.last_error,
+            # 房间名/开播状态：诊断"为什么收不到弹幕"最关键的两个信息
+            "room": dict(self.room_info),
         }
 
 
