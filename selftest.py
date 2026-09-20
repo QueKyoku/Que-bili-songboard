@@ -867,6 +867,53 @@ def test_changelog() -> None:
           len(first_body.strip()) > 40, f"{len(first_body.strip())} 字符")
 
 
+def test_bat_files() -> None:
+    """批处理文件必须是 GBK 编码，且不能用 `chcp 65001`。
+
+    真实踩过的坑：`启动.bat` 原本存成 UTF-8 无 BOM，里面写 `chcp 65001`。
+    cmd.exe 读批处理是按当前代码页逐字节解码的，文件编码和运行时代码页
+    一旦不一致，就会出现**整行被吃掉、后半截当成命令执行**的怪现象 ——
+    用户看到的是菜单里少了 [2]，还报
+    `'需要填房间号）' is not recognized as an internal or external command`。
+
+    中文 Windows 的原生代码页就是 936：文件存 GBK + `chcp 936`，
+    读取和输出两端一致，不需要任何运行时切换代码页。
+    """
+    print("\n=== 批处理文件编码 ===")
+    root = Path(__file__).resolve().parent
+    bats = sorted(root.glob("*.bat"))
+    check(f"找到 {len(bats)} 个 .bat", bool(bats))
+
+    for bat in bats:
+        raw = bat.read_bytes()
+        problems: list[str] = []
+
+        if raw[:3] == b"\xef\xbb\xbf":
+            problems.append("有 UTF-8 BOM")
+        try:
+            text = raw.decode("gbk")
+        except UnicodeDecodeError as exc:
+            problems.append(f"不是 GBK 编码（{exc}）")
+            text = raw.decode("utf-8", "replace")
+        if "chcp 65001" in text:
+            problems.append("还在用 chcp 65001")
+        if b"\n" in raw.replace(b"\r\n", b""):
+            problems.append("有裸 LF 换行（批处理要全 CRLF）")
+
+        # 中文必须能原样往返（GBK 编不出的字符会被换成 ?）
+        if "?" in text.replace("%~dp0", "").replace("2>&1", ""):
+            problems.append("有字符在 GBK 里存不下来（变成了 ?）")
+
+        check(f"{bat.name} 编码正确（GBK / CRLF / 无 BOM / 不用 65001）",
+              not problems, "; ".join(problems))
+
+        # 菜单里的中文要能读出来（防止整个文件被写坏）
+        if bat.name == "启动.bat":
+            for key in ("哔哩哔哩点歌板", "[1] 演示模式", "[2] 连直播间",
+                        "[3] 自检"):
+                check(f"启动.bat 里有「{key}」", key in text)
+
+
 def test_syntax() -> None:
     """所有源码都必须能编译、所有模块都必须能导入。
 
@@ -2337,6 +2384,7 @@ def main() -> int:
     print("哔哩哔哩点歌板 · 自检")
     test_syntax()
     test_web_js()
+    test_bat_files()
     test_changelog()
     test_config_robustness()
     test_commands()

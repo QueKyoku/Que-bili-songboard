@@ -1,34 +1,34 @@
 @echo off
-chcp 65001 >nul
+chcp 936 >nul
 cd /d "%~dp0"
 
 echo ============================================
-echo   å¯åŠ¨å¤–éƒ¨åª’ä½“ä¿¡æ¯æºï¼ˆMetabox-Nexus-PlayerCapï¼‰
+echo   Æô¶¯Íâ²¿Ã½ÌåĞÅÏ¢Ô´£¨Metabox-Nexus-PlayerCap£©
 echo ============================================
 echo.
-echo   å®ƒä¼šåšä¸¤ä»¶äº‹ï¼š
-echo     1) ç›‘å¬ 127.0.0.1:8766ï¼Œæä¾›"æ­£åœ¨æ’­æ”¾ + ç²¾ç¡®è¿›åº¦"æ¥å£
-echo     2) å¦‚æœç½‘æ˜“äº‘æ²¡å¸¦è°ƒè¯•å‚æ•°è¿è¡Œï¼Œä¼šå…³æ‰å®ƒå¹¶ç”¨è°ƒè¯•å‚æ•°é‡å¼€
+echo   Ëü»á×öÁ½¼şÊÂ£º
+echo     1) ¼àÌı 127.0.0.1:8766£¬Ìá¹©"ÕıÔÚ²¥·Å + ¾«È·½ø¶È"½Ó¿Ú
+echo     2) Èç¹ûÍøÒ×ÔÆÃ»´øµ÷ÊÔ²ÎÊıÔËĞĞ£¬»á¹ØµôËü²¢ÓÃµ÷ÊÔ²ÎÊıÖØ¿ª
 echo.
-echo   æ³¨æ„ï¼šå®ƒéœ€è¦ç®¡ç†å‘˜æƒé™ï¼Œä¸”å¯åŠ¨æ—¶ä¼šä¸ŠæŠ¥é¥æµ‹ï¼ˆè¯¦è§ READMEï¼‰
+echo   ×¢Òâ£ºËüĞèÒª¹ÜÀíÔ±È¨ÏŞ£¬ÇÒÆô¶¯Ê±»áÉÏ±¨Ò£²â£¨Ïê¼û README£©
 echo.
 
 net session >nul 2>&1
 if errorlevel 1 (
-    echo   [!] å½“å‰ä¸æ˜¯ç®¡ç†å‘˜ã€‚è¯·å³é”®æœ¬æ–‡ä»¶"ä»¥ç®¡ç†å‘˜èº«ä»½è¿è¡Œ"ã€‚
+    echo   [!] µ±Ç°²»ÊÇ¹ÜÀíÔ±¡£ÇëÓÒ¼ü±¾ÎÄ¼ş"ÒÔ¹ÜÀíÔ±Éí·İÔËĞĞ"¡£
     echo.
     pause
     exit /b 1
 )
 
 if not exist "tools\playercap\Metabox-Nexus-PlayerCap.exe" (
-    echo   [x] æ‰¾ä¸åˆ° tools\playercap\Metabox-Nexus-PlayerCap.exe
-    echo       è¯·å…ˆæŒ‰ README ä¸‹è½½å¹¶æ ¡éªŒã€‚
+    echo   [x] ÕÒ²»µ½ tools\playercap\Metabox-Nexus-PlayerCap.exe
+    echo       ÇëÏÈ°´ README ÏÂÔØ²¢Ğ£Ñé¡£
     pause
     exit /b 1
 )
 
 cd /d "%~dp0tools\playercap"
-echo   æ­£åœ¨å¯åŠ¨ PlayerCapï¼ˆCtrl+C å¯åœæ­¢ï¼‰...
+echo   ÕıÔÚÆô¶¯ PlayerCap£¨Ctrl+C ¿ÉÍ£Ö¹£©...
 echo.
 Metabox-Nexus-PlayerCap.exe
