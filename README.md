@@ -8,7 +8,7 @@
 git clone https://github.com/QueKyoku/Que-bili-songboard.git
 ```
 
-当前版本 **v0.2.3** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
+当前版本 **v0.2.4** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
 `python -m songboard --version` 可以直接问程序自己
 
 给 B 站主播用的点歌工具。观众发一条 `点歌 稻香`，程序就会把这首歌加到网易云的
@@ -67,11 +67,18 @@ git clone https://github.com/QueKyoku/Que-bili-songboard.git
 
 - Windows（播放队列桥依赖 Windows API）
 - Python 3.10+（开发环境用的是 3.12）
-- 依赖：`websockets`、`cryptography`（装不上 cryptography 也能跑，只是网易云网页接口会失效）
+- 依赖：**`websockets` 是必需的**（缺了连演示模式都起不来）；
+  `cryptography` 可选（缺了只是网易云的搜索/查时长不可用）
 
 ```bash
 pip install websockets cryptography
 ```
+
+> **双击 `启动.bat` 的话不用自己装**：它会先检查 Python 和依赖 ——
+> 缺依赖自动装，装不上会告诉你要手动敲哪一条；Python 没装或版本太旧也会
+> 给出明确指引，而不是甩一段 `ModuleNotFoundError` 让人猜。
+> （这个坑真踩过：从 GitHub 下载 zip 解压、双击启动、选完房间号，
+> 直接 `ModuleNotFoundError: No module named 'websockets'` 然后"已退出"。）
 
 ### 跑起来
 

@@ -8,6 +8,21 @@
 > ⚠️ 本项目依赖 B 站弹幕长连接和网易云的**非官方接口**，
 > 接口一改就可能失效。补丁版本里也可能会出现"适应上游变更"的修复。
 
+## [0.2.4] - 2026-09-20
+
+### 修复
+
+- **`启动.bat` 现在会自检 Python 和依赖**。之前从 GitHub 下载 zip 解压、
+  双击启动、选完房间号，直接抛
+  `ModuleNotFoundError: No module named 'websockets'` 然后"已退出" ——
+  屏幕上只有一段 traceback，看不出是"少装了一个包"。现在：
+  - 缺依赖 → 自动 `pip install websockets`（装不上会给出手动命令）
+  - 没装 Python → 明确提示去装 3.10+ 并勾选 *Add python.exe to PATH*
+  - Python 版本太旧 → 直接报出当前版本
+  - 没装 `cryptography` → 只提示一句（它只影响网易云搜索/查时长）
+- `README` 的环境一节把 `websockets` 标成**必需**、`cryptography` 标成可选，
+  并说明 `启动.bat` 会代劳。
+
 ## [0.2.3] - 2026-09-20
 
 ### 修复
@@ -132,6 +147,7 @@
 - 网易云的接口是非官方的，可能随官方改动失效。
 - 桥需要每次重新注入（网易云一重启就失效）。
 
+[0.2.4]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.0...v0.2.1
