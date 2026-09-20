@@ -174,6 +174,20 @@ def check_control(browser: str, base: str, seconds: int = 9) -> None:
           ("已知" in dom and "付费礼物" in dom and "免费礼物" in dom),
           str([k for k in ("已知", "付费礼物", "免费礼物") if k not in dom]))
 
+    # 叠加层地址必须是**完整 URL**：之前只显示相对路径 `/overlay`，
+    # 主播没法直接粘进 OBS / 直播姬的浏览器源（真实反馈）。
+    ov = re.findall(r'id="overlayUrl"[^>]*value="([^"]*)"', dom)
+    ov_url = ov[0] if ov else ""
+    check("控制台给出了完整的叠加层地址（能直接粘进 OBS）",
+          ov_url.startswith("http://") and ov_url.endswith("/overlay"),
+          f"overlayUrl={ov_url!r}")
+    check("叠加层地址用的是当前访问的地址（127.0.0.1:8765）",
+          base.replace("http://", "") in ov_url, f"{ov_url!r} vs {base}")
+    # 预览链接也要是绝对地址
+    lk = re.findall(r'id="overlayLink"[^>]*href="([^"]*)"', dom)
+    check("「预览」链接是绝对地址",
+          bool(lk) and lk[0].startswith("http://"), str(lk[:1]))
+
     # 顺带确认控制台没有把"写歌单"的老开关又露出来。
     # 只在**代码/JSON** 里找（带引号或是键名），注释里提到不算问题。
     leaked = re.findall(r'["\'](auto_add|playlist_id|write_playlist)["\']'

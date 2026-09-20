@@ -8,6 +8,17 @@
 > ⚠️ 本项目依赖 B 站弹幕长连接和网易云的**非官方接口**，
 > 接口一改就可能失效。补丁版本里也可能会出现"适应上游变更"的修复。
 
+## [0.2.5] - 2026-09-20
+
+### 修复
+
+- **控制台顶部只显示相对路径 `/overlay`，没法直接填进 OBS**。现在显示的是
+  拼好的完整地址（跟着你实际访问的地址走，换端口、换机器都对），
+  旁边多了「复制」按钮，还有「预览」直接打开带背景的调试地址。
+  （`navigator.clipboard` 拿不到时——非安全上下文——自动退回"选中 + 复制"。）
+- `tools/check_overlay_dom.py` 加了对应检查：控制台的叠加层地址必须是完整
+  URL 且指向当前访问的地址，预览链接也要是绝对地址。
+
 ## [0.2.4] - 2026-09-20
 
 ### 修复
@@ -147,6 +158,7 @@
 - 网易云的接口是非官方的，可能随官方改动失效。
 - 桥需要每次重新注入（网易云一重启就失效）。
 
+[0.2.5]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.1...v0.2.2

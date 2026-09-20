@@ -64,9 +64,16 @@
 <body>
 <div class="wrap">
   <h1><span>点歌板</span> 控制台</h1>
-  <div class="muted">叠加层地址（直播姬/OBS 加「浏览器源」用这个）：
-    <a href="/overlay?bg=1" target="_blank" id="overlayLink">/overlay</a>
-    · 换主题 <code>?theme=light</code> · 调大小 <code>?w=560&amp;fs=30</code> · 预览背景 <code>?bg=1</code>
+  <div class="muted">叠加层地址（直播姬 / OBS 加「浏览器源」时填这个）：
+    <div class="row" style="margin-top:6px">
+      <input class="grow" id="overlayUrl" readonly value="/overlay" />
+      <button class="ghost" id="btnCopyOverlay" type="button">复制</button>
+      <a id="overlayLink" href="/overlay?bg=1" target="_blank">预览</a>
+    </div>
+    <div class="hint">可选参数直接接在地址后面：
+      换主题 <code>?theme=light</code> · 调大小 <code>?w=560&amp;fs=30</code> ·
+      显示条数 <code>?show=10</code> · 预览背景 <code>?bg=1</code>
+    </div>
   </div>
 
   <div class="grid">
@@ -577,7 +584,35 @@ $('#btnNeSave').onclick = async () => {
   $('#extEnabled').checked = !!ex.enabled;
   $('#extUrl').value = ex.url || '';
   $('#roomInput').value = c.room_id || '';
-  $('#overlayLink').href = '/overlay?bg=1';
+
+  // ---- 叠加层地址：拼成**完整 URL**，方便直接粘进 OBS / 直播姬 ----
+  // 之前这里只显示相对路径 `/overlay`，主播根本没法拿去填浏览器源。
+  // 用 location.origin 是为了跟着实际访问地址走（换端口、换机器都对）。
+  const overlayUrl = location.origin + '/overlay';
+  const ovEl = $('#overlayUrl');
+  ovEl.value = overlayUrl;
+  // 同时写 value 属性：--dump-dom 只序列化属性，不写的话浏览器自检看不到
+  ovEl.setAttribute('value', overlayUrl);
+  $('#overlayLink').href = overlayUrl + '?bg=1';
+  $('#btnCopyOverlay').onclick = async () => {
+    const btn = $('#btnCopyOverlay');
+    const flash = () => {
+      btn.textContent = '已复制';
+      setTimeout(() => { btn.textContent = '复制'; }, 1500);
+    };
+    try {
+      await navigator.clipboard.writeText(overlayUrl);
+      flash();
+    } catch (e) {
+      // clipboard API 要安全上下文，拿不到就退回"选中 + 复制"
+      ovEl.removeAttribute('readonly');
+      ovEl.select();
+      try { document.execCommand('copy'); flash(); }
+      catch (e2) { logLine('复制失败，请手动选中上面的地址'); }
+      ovEl.setAttribute('readonly', 'readonly');
+    }
+  };
+
   connect();
   refresh();
   setInterval(refresh, 4000);
