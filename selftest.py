@@ -747,6 +747,71 @@ def test_config_robustness() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_web_js() -> None:
+    """网页里的内联 JS 必须能编译。
+
+    真实踩过的坑：overlay.html 里同一段 <script> 中出现了两次
+    `let lastKey` —— 同一作用域重复声明是**早期语法错误**，
+    整个 script 块会被浏览器直接丢弃：叠加层不报错、不渲染，
+    就停在"等待点歌…"，看起来像"服务没数据"，查起来极其费劲。
+
+    有 node 就用 node --check 真编译；没有就退化成"同一块里重复声明"的
+    粗筛（正是上面那个坑的特征），并明确说明用的是哪种检查。
+    """
+    print("\n== 网页内联 JS 语法 ==")
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+
+    root = Path(__file__).resolve().parent
+    pages = sorted((root / "web").glob("*.html"))
+    check(f"web/ 下有页面（找到 {len(pages)} 个）", bool(pages))
+
+    node = shutil.which("node")
+    tmp = Path(tempfile.mkdtemp(prefix="songboard-js-"))
+    bad: list[str] = []
+    dup: list[str] = []
+    try:
+        for page in pages:
+            html = page.read_text(encoding="utf-8")
+            blocks = [b for b in re.findall(r"<script[^>]*>(.*?)</script>",
+                                            html, re.S)]
+            if not blocks:
+                continue
+            # --- 粗筛：同一块里重复声明的**顶层** let/const/class ---
+            # 只认第 0 列开始的声明：函数体里的局部变量是缩进的，
+            # 把它们也算进来会满屏假报警（第一次写就踩了）。
+            for i, b in enumerate(blocks):
+                decls = re.findall(r"^(?:let|const|class)\s+([A-Za-z_$][\w$]*)",
+                                   b, re.M)
+                seen: set[str] = set()
+                for d in decls:
+                    if d in seen:
+                        dup.append(f"{page.name} 第{i + 1}块重复声明 {d}")
+                    seen.add(d)
+            if not node:
+                continue
+            js = tmp / (page.stem + ".js")
+            js.write_text("\n".join(blocks), encoding="utf-8")
+            r = subprocess.run([node, "--check", str(js)],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                first = (r.stderr or "").strip().splitlines()
+                bad.append(f"{page.name}: " + (first[1] if len(first) > 1
+                                               else "语法错误"))
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp, ignore_errors=True)
+
+    check("没有同一作用域重复声明（会让整段 script 失效）", not dup,
+          "; ".join(dup))
+    if node:
+        check("node --check 编译所有内联 JS 通过", not bad, "; ".join(bad))
+    else:
+        print("  [SKIP] 没装 node，只做了重复声明的粗筛（装 node 可做完整编译）")
+
+
 def test_syntax() -> None:
     """所有源码都必须能编译、所有模块都必须能导入。
 
@@ -2216,6 +2281,7 @@ def main() -> int:
 
     print("哔哩哔哩点歌板 · 自检")
     test_syntax()
+    test_web_js()
     test_config_robustness()
     test_commands()
     asyncio.run(test_queue())

@@ -140,9 +140,6 @@ function toast(text){
   clearTimeout(el._t); el._t = setTimeout(()=>el.classList.remove('show'), 2600);
 }
 
-// 上次渲染过的曲目 id 顺序，用来判断"要不要重建"
-let lastKey = null;
-
 function render(snap){
   const cur = snap.current;
   const box = document.getElementById('current');

@@ -648,11 +648,34 @@ python e2e_check.py http://127.0.0.1:8765
 
 | 工具 | 用途 |
 |---|---|
+| `python tools/check_overlay_dom.py --control` | 用无头 Edge/Chrome 真跑一遍叠加层和控制台（见下） |
 | `python diag_room.py <房间号> [秒数]` | 直连弹幕服务器，打印收到的每一个原始帧 |
 | `python tools/bridge_client.py` | 查看桥的状态、找主进程 |
 | `python tools/list_netease_windows.py` | 列出网易云各窗口，确认要注入哪个进程 |
 | `python tools/inject_bridge.py --dry-run` | 注入前检查（不写入） |
 | `tools/gsm_probe.ps1` | 列出系统媒体会话（看有哪些播放器能被读到） |
+
+### 叠加层"看起来没坏但不显示"的时候
+
+**叠加层是浏览器里的东西，服务端自检覆盖不到。** 页面里的 JS 一旦在运行时
+出错（或者整段 `<script>` 因为同一作用域重复声明 `let` 被浏览器直接丢弃），
+表现是**安安静静地停在「等待点歌…」**：服务端一切正常、日志一句不报。
+
+这个坑真的踩过：`overlay.html` 里 `let lastKey` 被写了两遍，
+浏览器把整段脚本丢了，叠加层完全不刷新。
+
+所以有个用无头浏览器真跑的检查：
+
+```bash
+python tools/check_overlay_dom.py             # 只查叠加层
+python tools/check_overlay_dom.py --control   # 顺便查控制台
+python tools/check_overlay_dom.py http://127.0.0.1:8800/overlay
+```
+
+它把 `/api/state` 当标准答案，比对页面里**实际渲染出来的**曲目，
+再顺手确认脚本真的执行了（`?bg=1` 会给 `<body>` 打 `data-bg="1"`）。
+`selftest.py` 里也有一条 `node --check`（装了 node 就用真编译，
+没装就退化成"同一块里重复声明"的粗筛），专门拦这类失误。
 
 ### 手动跑一遍完整流程
 
@@ -820,12 +843,13 @@ tools/
   bridge_client.py         桥的管道客户端
   list_netease_windows.py  找网易云主进程
   gsm_probe.ps1            列出系统媒体会话
+  check_overlay_dom.py     无头浏览器真跑叠加层/控制台
   playercap/               可选的外部媒体信息源（exe 未入库）
 
 bridge/                    编译产物（DLL，已 gitignore）
 build-obj/                 编译中间文件（已 gitignore）
 
-selftest.py                离线自检（271 项）
+selftest.py                离线自检（274 项，含网页 JS 语法）
 proc_check.py              进程级检查（7 项）
 e2e_check.py               端到端检查（⚠️ 有副作用）
 check_integration.py       集成检查（9 项）
