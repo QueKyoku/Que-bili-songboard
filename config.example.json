@@ -1,0 +1,98 @@
+{
+  "room_id": 0,
+  "mode": "demo",
+  "http_host": "127.0.0.1",
+  "http_port": 8765,
+  "danmaku": {
+    "prefixes": [
+      "点歌",
+      "!点歌",
+      "#点歌",
+      "求歌"
+    ],
+    "skip_keywords": [
+      "切歌",
+      "下一首",
+      "跳过"
+    ],
+    "cancel_keywords": [
+      "取消点歌",
+      "撤销点歌"
+    ],
+    "query_keywords": [
+      "查询点歌",
+      "我的点歌",
+      "点歌查询"
+    ]
+  },
+  "queue": {
+    "max_size": 30,
+    "per_user_limit": 2,
+    "cooldown_seconds": 30,
+    "max_song_name_len": 40
+  },
+  "board": {
+    "title": "点歌板",
+    "subtitle": "弹幕发送「点歌 歌名」",
+    "show_size": 8,
+    "theme": "dark"
+  },
+  "extapi": {
+    "enabled": false,
+    "urls": [],
+    "url": "",
+    "poll_seconds": 2,
+    "timeout": 3,
+    "max_bytes": 8388608,
+    "fields": {}
+  },
+  "media": {
+    "auto_next": true,
+    "watch": true,
+    "poll_seconds": 2,
+    "duration_fallback": 300,
+    "grace_seconds": 9,
+    "min_playing_seconds": 25,
+    "almost_done_seconds": 3,
+    "trust_browser_progress": false,
+    "match_threshold": 0.5,
+    "prefer_apps": [
+      "msedge",
+      "chrome",
+      "firefox",
+      "spotify",
+      "potplayer",
+      "cloudmusic"
+    ]
+  },
+  "netease": {
+    "enabled": false,
+    "auto_add": false,
+    "playlist_id": "",
+    "cookie": "",
+    "driver": "playlist",
+    "reorder": true,
+    "queue_head_only": true,
+    "order_playlist": false,
+    "append_last": true,
+    "max_tracks": 5,
+    "prune_played": true,
+    "write_playlist": false
+  },
+  "queue_only": {
+    "enabled": true,
+    "play_if_idle": true
+  },
+  "ncm_bridge": {
+    "enabled": false,
+    "insert_next": true,
+    "play_if_idle": true,
+    "timeout": 3.0,
+    "probe_seconds": 30
+  },
+  "playback": {
+    "authority": "netease",
+    "fallback_to_board": true,
+    "strict_match": true
+  }
+}

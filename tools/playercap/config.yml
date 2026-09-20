@@ -1,0 +1,19 @@
+# Metabox-Nexus-PlayerCap 配置
+# 注意：addr 改成 8766，因为默认的 8765 被点歌板占用了。
+addr: "127.0.0.1:8766"
+
+# 歌词时间偏移（毫秒），正值=歌词提前
+offset: 200
+
+# 轮询间隔（毫秒）
+poll: 30
+
+# 优先播放器：网易云
+prior-player:
+- cloudmusicv3
+
+# 优先播放器暂停超过 15 秒后释放主输出
+prior-player-expire: 15
+
+# 网易云专用偏移
+cloudmusicv3-offset: 500

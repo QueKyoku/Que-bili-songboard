@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>点歌板 · 叠加层</title>
+<style>
+  /* ===== 可调样式：改这几个变量就能换风格 ===== */
+  :root{
+    --panel-bg: rgba(16,18,28,.72);
+    --panel-border: rgba(255,255,255,.10);
+    --text: #fff;
+    --text-dim: rgba(255,255,255,.55);
+    --accent: #ff6b9d;          /* B 站粉 */
+    --accent2: #4ee1ff;
+    --radius: 16px;
+    --font-size: 26px;
+    --panel-width: 460px;
+    --gap: 10px;
+  }
+  html[data-theme="light"]{
+    --panel-bg: rgba(255,255,255,.80);
+    --panel-border: rgba(0,0,0,.10);
+    --text: #16181f;
+    --text-dim: rgba(0,0,0,.5);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{width:100%;height:100%;background:transparent;overflow:hidden}
+  body{
+    font-family:"Microsoft YaHei","PingFang SC","Noto Sans SC",system-ui,sans-serif;
+    color:var(--text);
+    display:flex;align-items:flex-start;justify-content:flex-end;
+    padding:24px;
+  }
+  /* 预览用假背景：?bg=1 */
+  body[data-bg="1"]{
+    background:
+      radial-gradient(1200px 600px at 20% 10%, #2b1a4a 0%, transparent 60%),
+      radial-gradient(900px 500px at 85% 85%, #123b4a 0%, transparent 55%),
+      #0b0d13;
+  }
+  #board{
+    width:var(--panel-width);
+    background:var(--panel-bg);
+    border:1px solid var(--panel-border);
+    border-radius:var(--radius);
+    backdrop-filter:blur(14px) saturate(150%);
+    -webkit-backdrop-filter:blur(14px) saturate(150%);
+    box-shadow:0 18px 50px rgba(0,0,0,.35);
+    overflow:hidden;
+    font-size:var(--font-size);
+  }
+  header{
+    display:flex;align-items:baseline;gap:.5em;
+    padding:.55em .8em;
+    background:linear-gradient(90deg, rgba(255,107,157,.22), rgba(78,225,255,.10));
+    border-bottom:1px solid var(--panel-border);
+  }
+  header .title{font-weight:800;letter-spacing:.04em;
+    background:linear-gradient(90deg,var(--accent),var(--accent2));
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  header .sub{font-size:.52em;color:var(--text-dim);margin-left:auto}
+  #current{
+    display:flex;align-items:center;gap:.55em;
+    padding:.6em .8em;
+    border-bottom:1px dashed var(--panel-border);
+    background:rgba(255,255,255,.03);
+  }
+  #current .eq{display:flex;align-items:flex-end;gap:2px;height:1em;flex:0 0 auto}
+  #current .eq i{width:3px;background:var(--accent);border-radius:2px;animation:eq .9s infinite ease-in-out}
+  #current .eq i:nth-child(2){animation-delay:.15s;background:var(--accent2)}
+  #current .eq i:nth-child(3){animation-delay:.3s}
+  #current .eq i:nth-child(4){animation-delay:.45s;background:var(--accent2)}
+  @keyframes eq{0%,100%{height:20%}50%{height:100%}}
+  #current .label{font-size:.5em;color:var(--text-dim);letter-spacing:.1em}
+  #current .song{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #current .by{font-size:.5em;color:var(--text-dim);margin-left:auto;flex:0 0 auto}
+  #current.empty{opacity:.55}
+  #current.empty .eq{display:none}
+  ol#queue{list-style:none;padding:.35em .5em .5em}
+  ol#queue li{
+    display:flex;align-items:center;gap:.5em;
+    padding:.32em .45em;border-radius:10px;
+    animation:grow .45s cubic-bezier(.2,1.4,.3,1) both;
+  }
+  ol#queue li .rank{
+    flex:0 0 auto;min-width:1.5em;height:1.5em;border-radius:8px;
+    display:grid;place-items:center;font-size:.5em;font-weight:700;
+    background:rgba(255,255,255,.10);color:var(--text-dim)
+  }
+  ol#queue li:nth-child(1) .rank{background:linear-gradient(135deg,var(--accent),#ff9a6b);color:#fff}
+  ol#queue li .name{font-size:.72em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  ol#queue li .user{font-size:.5em;color:var(--text-dim);margin-left:auto;flex:0 0 auto;opacity:.85}
+  @keyframes grow{from{opacity:0;transform:translateX(24px) scale(.94)}to{opacity:1;transform:none}}
+  ol#queue li.flash{animation:flash .8s ease-out}
+  @keyframes flash{0%{background:rgba(255,107,157,.35)}100%{background:transparent}}
+  #toast{
+    position:fixed;left:50%;bottom:32px;transform:translateX(-50%) translateY(20px);
+    background:rgba(0,0,0,.78);color:#fff;padding:.5em .9em;border-radius:12px;
+    font-size:20px;opacity:0;transition:.3s;pointer-events:none;max-width:80vw
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #empty{font-size:.55em;color:var(--text-dim);padding:.2em .8em 1em}
+</style>
+</head>
+<body>
+<div id="board">
+  <header>
+    <span class="title" id="boardTitle">点歌板</span>
+    <span class="sub" id="boardSub"></span>
+  </header>
+  <div id="current" class="empty">
+    <span class="eq"><i></i><i></i><i></i><i></i></span>
+    <div>
+      <div class="label">正在播放</div>
+      <div class="song" id="currentSong">等待点歌…</div>
+    </div>
+    <span class="by" id="currentBy"></span>
+  </div>
+  <ol id="queue"></ol>
+  <div id="empty"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+const qs = new URLSearchParams(location.search);
+if (qs.get('bg') === '1') document.body.dataset.bg = '1';
+if (qs.get('theme')) document.documentElement.dataset.theme = qs.get('theme');
+if (qs.get('w')) document.documentElement.style.setProperty('--panel-width', qs.get('w') + 'px');
+if (qs.get('fs')) document.documentElement.style.setProperty('--font-size', qs.get('fs') + 'px');
+if (qs.get('accent')) document.documentElement.style.setProperty('--accent', qs.get('accent'));
+const SHOW = parseInt(qs.get('show') || '8', 10);
+
+let cfg = { title:'点歌板', subtitle:'', show_size: 8 };
+// 上次渲染过的曲目 id 顺序，用来判断"要不要重建"（见 render()）
+let lastKey = null;
+
+function toast(text){
+  const el = document.getElementById('toast');
+  el.textContent = text; el.classList.add('show');
+  clearTimeout(el._t); el._t = setTimeout(()=>el.classList.remove('show'), 2600);
+}
+
+// 上次渲染过的曲目 id 顺序，用来判断"要不要重建"
+let lastKey = null;
+
+function render(snap){
+  const cur = snap.current;
+  const box = document.getElementById('current');
+  const songEl = document.getElementById('currentSong');
+  const byEl = document.getElementById('currentBy');
+  if (cur){
+    box.classList.remove('empty');
+    songEl.textContent = cur.song;
+    byEl.textContent = cur.user ? '@' + cur.user : '';
+  } else {
+    box.classList.add('empty');
+    songEl.textContent = '等待点歌…';
+    byEl.textContent = '';
+  }
+
+  const queue = (snap.queue || []).filter(s => s.state !== 'playing');
+  const limit = cfg.show_size || SHOW;
+  const shown = queue.slice(0, limit);
+  const ol = document.getElementById('queue');
+
+  // ⚠️ 闪屏的根因就在这里：
+  // 服务每 2 秒广播一次 status，如果每次都 `ol.innerHTML = ''` 整个重建，
+  // 每个 <li> 上的 `animation: grow .45s` 就会**重放一次**
+  // → 整个列表每 2 秒闪一下。
+  // 所以：内容没变就什么都不做；内容变了也只复用/新增/删除必要的节点，
+  // 已经在页面上的条目保持原样，动画不会被重放。
+  const key = shown.map(s => s.id + '\u0001' + s.song + '\u0001' + (s.user || '')).join('\u0002');
+  if (key === lastKey){
+    updateBoardTexts(cur, queue, limit);
+    return;
+  }
+  const prevKey = lastKey;
+  lastKey = key;
+
+  const wantIds = shown.map(s => String(s.id));
+  // 先删掉不再显示的
+  Array.from(ol.children).forEach(li => {
+    if (!wantIds.includes(li.dataset.id)) li.remove();
+  });
+  // 再按顺序补齐 / 就地更新
+  shown.forEach((s, i) => {
+    const sid = String(s.id);
+    let li = Array.from(ol.children).find(x => x.dataset.id === sid);
+    if (!li){
+      li = document.createElement('li');
+      li.dataset.id = sid;
+      li.innerHTML = `<span class="rank"></span>
+        <span class="name"></span>
+        <span class="user"></span>`;
+      // 只在**首次出现**时播入场动画；prevKey===null 表示这是首屏，
+      // 首屏也让它动一下（好看），但后续轮询绝不重放。
+      if (prevKey !== null && !prevKey.includes(sid)) li.classList.add('flash');
+    }
+    li.querySelector('.rank').textContent = String(i + 1);
+    li.querySelector('.name').textContent = s.song;
+    li.querySelector('.user').textContent = s.user ? '@' + s.user : '';
+    // 保证顺序与数据一致（就地移动，不重建节点）
+    const cur_at = ol.children[i];
+    if (cur_at !== li) ol.insertBefore(li, cur_at || null);
+  });
+
+  updateBoardTexts(cur, queue, limit);
+}
+
+function updateBoardTexts(cur, queue, limit){
+  const emptyEl = document.getElementById('empty');
+  emptyEl.textContent = queue.length === 0
+    ? (cur ? '队列空了，等你点歌～' : '')
+    : (queue.length > limit ? `还有 ${queue.length - limit} 首在后面…` : '');
+  document.getElementById('boardTitle').textContent = cfg.title || '点歌板';
+  document.getElementById('boardSub').textContent = cfg.subtitle || '';
+}
+
+function connect(){
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onmessage = (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.snapshot) render(msg.snapshot);
+    if (msg.event === 'added' && msg.item) toast(`🎵 ${msg.item.user} 点了《${msg.item.song}》`);
+    if (msg.event === 'playing' && msg.item) toast(`▶ 正在播放《${msg.item.song}》`);
+    if (msg.event === 'pending_added' && msg.item) toast(`队列满啦，《${msg.item.song}》先进入备选`);
+  };
+  ws.onclose = () => setTimeout(connect, 1500);
+}
+fetch('/api/config').then(r => r.json()).then(c => {
+  cfg.title = (c.board || {}).title || cfg.title;
+  cfg.subtitle = (c.board || {}).subtitle || '';
+  cfg.show_size = (c.board || {}).show_size || SHOW;
+  if ((c.board||{}).theme) document.documentElement.dataset.theme = c.board.theme;
+}).catch(()=>{}).finally(connect);
+</script>
+</body>
+</html>

@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>点歌板 · 控制台</title>
+<style>
+  :root{
+    --bg:#0e1017; --panel:#171a24; --panel2:#1e222e; --line:#282d3b;
+    --text:#e8ebf2; --dim:#8b93a7; --accent:#ff6b9d; --accent2:#4ee1ff;
+    --ok:#3ddc97; --warn:#ffcc55; --err:#ff5f6d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.5 "Microsoft YaHei","PingFang SC",system-ui,sans-serif}
+  a{color:var(--accent2)}
+  .wrap{max-width:1180px;margin:0 auto;padding:22px 20px 60px}
+  h1{font-size:20px;margin:0 0 4px}
+  h1 span{background:linear-gradient(90deg,var(--accent),var(--accent2));
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .muted{color:var(--dim);font-size:12.5px}
+  .grid{display:grid;grid-template-columns:1.25fr .85fr;gap:16px;margin-top:18px}
+  @media (max-width:900px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 15px}
+  .card h2{font-size:14px;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+  .card h2 .dot{width:8px;height:8px;border-radius:50%;background:var(--dim)}
+  .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .dot.off{background:var(--err)}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .row + .row{margin-top:8px}
+  input,select,button{font:inherit;color:var(--text);background:var(--panel2);
+    border:1px solid var(--line);border-radius:9px;padding:8px 10px;outline:none}
+  input:focus,select:focus{border-color:var(--accent2)}
+  button{cursor:pointer;transition:.15s}
+  button:hover{border-color:var(--accent2);transform:translateY(-1px)}
+  button.primary{background:linear-gradient(135deg,var(--accent),#ff9a6b);border:none;color:#fff;font-weight:700}
+  button.ghost{background:transparent}
+  button.danger:hover{border-color:var(--err);color:var(--err)}
+  .grow{flex:1;min-width:120px}
+  .now{background:linear-gradient(135deg,rgba(255,107,157,.18),rgba(78,225,255,.10));
+    border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:12px}
+  .now .t{font-size:17px;font-weight:700}
+  .now .u{color:var(--dim);font-size:12.5px}
+  ul.list{list-style:none;margin:0;padding:0}
+  ul.list li{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;
+    border:1px solid transparent}
+  ul.list li:hover{background:var(--panel2);border-color:var(--line)}
+  ul.list li .idx{width:22px;color:var(--dim);font-size:12px;text-align:center}
+  ul.list li .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  ul.list li .who{color:var(--dim);font-size:12px}
+  ul.list li .mini{padding:3px 8px;font-size:12px;border-radius:7px}
+  .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11.5px;
+    background:var(--panel2);border:1px solid var(--line);color:var(--dim)}
+  .tag.ok{color:var(--ok);border-color:rgba(61,220,151,.35)}
+  .tag.warn{color:var(--warn);border-color:rgba(255,204,85,.35)}
+  #log{height:190px;overflow:auto;background:#0b0d13;border:1px solid var(--line);
+    border-radius:10px;padding:9px 11px;font:12px/1.6 Consolas,"Courier New",monospace;color:#b9c2d6}
+  #log div{white-space:pre-wrap;word-break:break-all}
+  #log .t{color:#5c667d}
+  .hint{font-size:12px;color:var(--dim);margin-top:6px}
+  code{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:12.5px}
+  details summary{cursor:pointer;color:var(--dim);font-size:12.5px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span>点歌板</span> 控制台</h1>
+  <div class="muted">叠加层地址（直播姬/OBS 加「浏览器源」用这个）：
+    <a href="/overlay?bg=1" target="_blank" id="overlayLink">/overlay</a>
+    · 换主题 <code>?theme=light</code> · 调大小 <code>?w=560&amp;fs=30</code> · 预览背景 <code>?bg=1</code>
+  </div>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2><span class="dot" id="connDot"></span>连接状态 <span class="tag" id="modeTag">-</span></h2>
+        <div class="row">
+          <button class="primary" id="btnDemo">演示模式</button>
+          <button id="btnLive">连直播间</button>
+          <input class="grow" id="roomInput" type="number" placeholder="直播间号（不是 UID）" />
+          <button id="btnSetRoom">应用房间号</button>
+        </div>
+        <div class="hint" id="statusLine">—</div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h2>播放 / 队列</h2>
+        <div class="now">
+          <div class="label" id="nowSource">正在播放</div>
+          <div class="t" id="nowTitle">—</div>
+          <div class="u" id="nowUser"></div>
+          <div class="u" id="nowTimer" style="margin-top:4px"></div>
+        </div>
+        <div class="row" style="margin-bottom:10px">
+          <label class="row" style="gap:6px;flex:0 0 auto">
+            <input type="checkbox" id="autoNext" /> 自动下一首
+          </label>
+          <span class="tag" id="detectTag">播放器未检测到</span>
+        </div>
+        <div class="hint" id="detectHint" style="margin-bottom:10px">
+          自动下一首靠只读播放器状态判断：网易云客户端读窗口标题（有歌名、无进度），
+          Edge/Chrome 等读系统媒体会话（有进度）。读不到真实时长时会按配置里的兜底时长计时。
+        </div>
+        <div class="card" style="background:var(--panel2);padding:10px 12px">
+          <h2 style="font-size:13px;margin-bottom:8px">
+            <span class="tag" id="extTag">未启用</span> 外部精确进度源（可选）
+          </h2>
+          <div class="row">
+            <input class="grow" id="extUrl" placeholder="http://127.0.0.1:8766/cloudmusicv3/song_info" />
+            <button id="btnExtProbe" class="ghost">探测</button>
+          </div>
+          <div class="row">
+            <label class="row" style="gap:6px"><input type="checkbox" id="extEnabled" /> 启用</label>
+            <button id="btnExtSave" class="primary">保存</button>
+          </div>
+          <div class="hint" id="extHint">
+            网易云客户端自己不给进度。想拿到"精确到秒"的进度，可以跑一个能读进度的本机服务
+            （如 Metabox-Nexus-PlayerCap），把它的 JSON 接口地址填这里。<br/>
+            注意它默认端口也是 8765，会跟本程序冲突，记得改到别的端口。
+          </div>
+        </div>
+        <div class="row">
+          <input class="grow" id="addSong" placeholder="手动加点一首歌（回车）" />
+          <button id="btnAdd" class="primary">加进队列</button>
+          <button id="btnNext">⏭ 下一首</button>
+          <button id="btnDone">✅ 这首播完了</button>
+          <button id="btnClear" class="danger">清空队列</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <input style="flex:0 0 130px" id="durInput" type="number" min="0" placeholder="这首多长(秒)" />
+          <button id="btnSetDur">设定时长</button>
+          <span class="muted">给当前这首一个时长，让自动切歌更准（0 = 清除）</span>
+        </div>
+        <ul class="list" id="queueList" style="margin-top:12px"></ul>
+        <div class="hint" id="queueHint"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2>网易云（播放队列）</h2>
+        <div class="row">
+          <label class="row" style="gap:6px"><input type="checkbox" id="neEnabled" /> 启用（搜索歌曲 / 查时长）</label>
+        </div>
+        <div class="row">
+          <input class="grow" id="neCookie" type="password" placeholder="Cookie（MUSIC_U=...; __csrf=...）" />
+          <button id="btnNeSave">保存</button>
+        </div>
+        <div class="row">
+          <span class="tag" id="neStatus">未启用</span>
+        </div>
+        <div class="hint">
+          程序<b>不写入你的歌单</b>——一个字节都不动。<br/>
+          点歌只插进网易云的<b>播放队列</b>：一次只保队头在"下一首"，
+          等它开始播，再把下一首排上去。<br/>
+          需要先注入 <code>bridge\AwooNcmCefBridge.dll</code>（见 <code>tools\inject_bridge.py</code>）。
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <h2>日志</h2>
+        <div id="log"></div>
+        <details>
+          <summary>弹幕点歌指令</summary>
+          <div class="hint">
+            <code>点歌 稻香</code> 加入队列 · <code>切歌</code> 跳过当前（默认人人可切）·
+            <code>我的点歌</code> 查询自己的排队情况 · <code>取消点歌</code> 撤销自己的点歌<br/>
+            去重 / 冷却 / 每人上限都能在 <code>config.json</code> 里调。
+          </div>
+        </details>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = async (path, body) => {
+  const res = await fetch(path, body === undefined ? undefined : {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body || {}),
+  });
+  return res.json().catch(() => ({}));
+};
+let cfg = {}, lastLogTs = 0;
+// 队列列表的内容指纹：没变就不重建 DOM（否则每 2 秒闪一次，
+// 还会把正在点的按钮抽走）
+let lastQueueKey = null;
+
+function logLine(text){
+  const el = document.getElementById('log');
+  const div = document.createElement('div');
+  const now = new Date().toLocaleTimeString('zh-CN', {hour12:false});
+  div.innerHTML = `<span class="t">${now}</span> `;
+  div.appendChild(document.createTextNode(text));
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+  while (el.childElementCount > 400) el.removeChild(el.firstChild);
+}
+
+function fmt(sec){
+  if (sec === null || sec === undefined) return '—';
+  const s = Math.max(0, Math.round(sec));
+  return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+}
+
+function renderState(snap){  const cur = snap.current;
+  const m = (snap.status && snap.status.media) || {};
+  const det = m.detected || null;
+  const authority = (cfg.playback && cfg.playback.authority) || 'netease';
+  const useNetease = authority === 'netease' && det && det.title;
+
+  // 「正在播放」以谁为准由 playback.authority 决定（默认网易云）
+  if (useNetease) {
+    $('#nowSource').textContent = '正在播放（网易云）';
+    $('#nowTitle').textContent = det.title;
+    $('#nowUser').textContent = det.artist ? ('艺人：' + det.artist) : '';
+  } else {
+    $('#nowSource').textContent = '正在播放（点歌板队列）';
+    $('#nowTitle').textContent = cur ? cur.song : '—';
+    $('#nowUser').textContent = cur ? ('点歌人 @' + cur.user + ' · ' + cur.created_at_str) : '';
+  }
+
+  const timer = $('#nowTimer');
+  if (useNetease) {
+    const bits = det.duration > 0
+      ? [`${fmt(det.position)} / ${fmt(det.duration)}`]
+      : ['网易云没给进度'];
+    if (cur && det.title && !det.title.includes(cur.song) && !cur.song.includes(det.title)) {
+      bits.push(`队列待放的是《${cur.song}》`);
+    } else if (!cur) {
+      bits.push('点歌板队列是空的');
+    }
+    timer.textContent = '⏱ ' + bits.join(' · ');
+  } else if (cur) {
+    const bits = [`已播 ${fmt(cur.playing_elapsed)}`];
+    if (cur.remaining !== null && cur.remaining !== undefined) bits.push(`剩余 ${fmt(cur.remaining)}`);
+    timer.textContent = '⏱ ' + bits.join(' · ');
+  } else {
+    timer.textContent = '';
+  }
+  const list = $('#queueList');
+  const items = (snap.queue || []).filter(s => s.state !== 'playing');
+  // ⚠️ 和叠加层同样的坑：服务每 2 秒广播一次状态，如果每次都整个重建列表，
+  // 不仅会闪，还会把正在点的按钮（置顶/移除）在手指下抽走。
+  // 所以内容没变就完全不动 DOM。
+  const qkey = items.map(s => s.id + '\u0001' + s.song + '\u0001' + s.user).join('\u0002')
+    + '||' + (snap.pending || []).map(s => s.id + '\u0001' + s.song).join('\u0002');
+  if (qkey !== lastQueueKey){
+    lastQueueKey = qkey;
+    list.innerHTML = '';
+    items.forEach((s, i) => {
+      const li = document.createElement('li');
+      const idx = document.createElement('span'); idx.className = 'idx'; idx.textContent = i + 1;
+      const n = document.createElement('span'); n.className = 'n'; n.textContent = s.song;
+      const who = document.createElement('span'); who.className = 'who'; who.textContent = '@' + s.user;
+      const up = document.createElement('button'); up.className = 'mini ghost'; up.textContent = '⤒';
+      up.title = '置顶'; up.onclick = () => api('/api/move', {id: s.id, top: true});
+      const del = document.createElement('button'); del.className = 'mini danger'; del.textContent = '✕';
+      del.title = '移除'; del.onclick = () => api('/api/remove', {id: s.id});
+      li.append(idx, n, who, up, del);
+      list.appendChild(li);
+    });
+    (snap.pending || []).forEach((s, i) => {
+      const li = document.createElement('li');
+      const idx = document.createElement('span'); idx.className = 'idx'; idx.textContent = '备';
+      const n = document.createElement('span'); n.className = 'n'; n.textContent = s.song;
+      const who = document.createElement('span'); who.className = 'who'; who.textContent = '@' + s.user;
+      const add = document.createElement('button'); add.className = 'mini'; add.textContent = '入队';
+      add.onclick = () => api('/api/add', {song: s.song, user: s.user, force: true});
+      li.append(idx, n, who, add);
+      list.appendChild(li);
+    });
+  }
+  const c = snap.counts || {};
+  $('#queueHint').textContent = items.length || c.pending
+    ? `队列 ${items.length} 首${c.pending ? `，备选 ${c.pending} 首` : ''}`
+    : '队列是空的';
+}
+
+function renderStatus(st){
+  const dot = $('#connDot');
+  dot.className = 'dot ' + (st.connected ? 'on' : 'off');
+  $('#modeTag').textContent = st.mode === 'demo' ? '演示模式' : '直播间 ' + (st.room_id || '-');
+  const bits = [];
+  bits.push(st.connected ? '已连接弹幕服务器' : '未连接');
+  if (st.mode !== 'demo') bits.push('人气 ' + (st.popularity || 0));
+  bits.push('累计收到弹幕 ' + (st.danmaku_count || 0) + ' 条');
+  if (st.mode !== 'demo' && st.connected && !(st.danmaku_count > 0)) {
+    bits.push('⚠️ 已连上但还没收到过弹幕——未开播时是正常的，开播后才有弹幕流');
+  }
+  if (st.last_error) bits.push('最近错误：' + st.last_error);
+  $('#statusLine').textContent = bits.join(' · ');
+
+  const m = st.media || {};
+  const det = m.detected;
+  const tl = m.timeline;
+  const tag = $('#detectTag');
+  $('#autoNext').checked = !!m.auto_next;
+  if (det && det.title) {
+    tag.textContent = `${det.app} 正在放《${det.title}》` + (det.artist ? ' - ' + det.artist : '')
+      + (det.duration > 0 ? ` ${fmt(det.position)}/${fmt(det.duration)}` : '（无进度）');
+    tag.className = 'tag ok';
+  } else {
+    tag.textContent = m.watch ? '未检测到播放器（打开网易云客户端放歌）' : '播放检测已关闭';
+    tag.className = 'tag warn';
+  }
+  // 单独显示"进度来源"，并说明它算不算当前这首——避免看 B站视频时被误导
+  const hint = $('#detectHint');
+  let h = '自动下一首靠只读播放器状态判断：网易云客户端读窗口标题（有歌名、无进度），'
+        + '浏览器/系统媒体会话能提供进度但常常没有标题。';
+  if (tl) {
+    const who = tl.app + (tl.title ? `《${tl.title}》` : '（无标题）');
+    const pos = tl.duration > 0 ? ` ${fmt(tl.position)}/${fmt(tl.duration)}` : '';
+    if (m.timeline_attributed) {
+      h += ` 当前采用进度来源：${who}${pos}（已确认算在当前这首上）。`;
+    } else if (tl.title) {
+      h += ` 进度来源：${who}${pos}，但它和当前歌不匹配，不参与自动切歌。`;
+    } else {
+      h += ` 检测到一份无标题进度：${who}${pos}，无法确认是音乐还是视频，`
+         + `默认不参与自动切歌（可在 config.json 打开 media.trust_browser_progress）。`;
+    }
+  }
+  hint.textContent = h;
+  if (m.error) {
+    hint.textContent += `　⚠️ 播放检测报错：${m.error}`;
+    hint.style.color = 'var(--err)';
+  } else {
+    hint.style.color = '';
+  }
+
+  const ex = m.extapi || {};
+  const extTag = $('#extTag');
+  if (ex.enabled) {
+    if (ex.alive) {
+      extTag.textContent = `已连接（${ex.hits} 次读取）`;
+      extTag.className = 'tag ok';
+    } else {
+      extTag.textContent = '已启用但读不到数据';
+      extTag.className = 'tag warn';
+    }
+  } else {
+    extTag.textContent = '未启用';
+    extTag.className = 'tag';
+  }
+}
+
+async function refresh(){
+  const [state, status, conf] = await Promise.all([
+    fetch('/api/state').then(r => r.json()),
+    fetch('/api/status').then(r => r.json()).catch(() => ({})),
+    fetch('/api/config').then(r => r.json()),
+  ]);
+  cfg = conf;
+  renderState(state);
+  // 让"启用加歌"的勾选框始终反映服务器真实状态，
+  // 避免出现"勾是勾着的、但实际没启用"这种自相矛盾的显示
+  const ne = conf.netease || {};
+  if (document.activeElement !== $('#neEnabled')) $('#neEnabled').checked = !!ne.enabled;
+  if (status.status) renderStatus(status.status);
+  if (status.log) status.log.forEach(l => { if (l.ts > lastLogTs) { lastLogTs = l.ts; logLine(l.text); } });
+}
+
+function connect(){
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = ev => {
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.snapshot) renderState(m.snapshot);
+    if (m.status) renderStatus(m.status);
+    if (m.log && m.log.ts > lastLogTs) { lastLogTs = m.log.ts; logLine(m.log.text); }
+  };
+  ws.onclose = () => setTimeout(connect, 1500);
+}
+
+// ---- 事件绑定 ----
+$('#btnDemo').onclick = async () => { await api('/api/mode', {mode:'demo'}); logLine('已切到演示模式'); };
+$('#btnLive').onclick = async () => { await api('/api/mode', {mode:'live'}); logLine('已切到直播间模式'); };
+$('#btnSetRoom').onclick = async () => {
+  const v = parseInt($('#roomInput').value, 10);
+  if (!v) return alert('请填写直播间号');
+  await api('/api/room', {room_id: v});
+  logLine('房间号已设为 ' + v + '，正在重连');
+};
+$('#btnAdd').onclick = async () => {
+  const song = $('#addSong').value.trim();
+  if (!song) return;
+  const r = await api('/api/add', {song, user: '主播', force: true});
+  logLine(r.ok ? `已加入《${song}》` : `加入失败：${r.error || r.result}`);
+  $('#addSong').value = '';
+};
+$('#addSong').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btnAdd').click(); });
+$('#btnNext').onclick = () => api('/api/next', {reason:'skip'});
+$('#btnDone').onclick = async () => {
+  const r = await api('/api/mark_done', {});
+  logLine('手动确认播完 → ' + ((r.current && r.current.song) || '队列已空'));
+};
+$('#btnSetDur').onclick = async () => {
+  const secs = parseFloat($('#durInput').value || '0');
+  const r = await api('/api/duration', {seconds: secs});
+  logLine(r.ok ? `当前歌曲时长设为 ${secs} 秒` : '现在没有正在播放的歌');
+  $('#durInput').value = '';
+};
+$('#autoNext').onchange = async (e) => {
+  await api('/api/auto_next', {enabled: e.target.checked});
+  logLine('自动下一首已' + (e.target.checked ? '开启' : '关闭'));
+};
+$('#btnExtProbe').onclick = async () => {
+  const url = $('#extUrl').value.trim();
+  const r = await api('/api/extapi/probe', {url});
+  $('#extHint').textContent = (r.ok ? '✅ ' : '❌ ') + (r.message || '')
+    + (r.top_keys && r.top_keys.length ? `　返回的顶层字段：${r.top_keys.join(', ')}` : '');
+  logLine('外部源探测：' + (r.message || JSON.stringify(r)));
+};
+$('#btnExtSave').onclick = async () => {
+  const r = await api('/api/extapi', {enabled: $('#extEnabled').checked, url: $('#extUrl').value.trim()});
+  $('#extHint').textContent = (r.ok ? '✅ ' : '⚠️ ') + (r.message || '');
+  logLine('外部媒体源：' + (r.message || ''));
+};
+$('#btnClear').onclick = () => { if (confirm('清空整个队列？')) api('/api/clear', {}); };
+$('#btnNeSave').onclick = async () => {
+  // 只保留"启用（搜索/查时长）"与 cookie。歌单相关字段不再由控制台写，
+  // 避免误把 write_playlist / auto_add 打开而动了主播的歌单。
+  const body = { enabled: $('#neEnabled').checked };
+  if ($('#neCookie').value.trim()) body.cookie = $('#neCookie').value.trim();
+  await api('/api/netease/enable', body);
+  logLine(`网易云：搜索/查时长${body.enabled ? '已开启' : '已关闭'}（歌单始终不写入）`);
+  $('#neCookie').value = '';
+  refresh();
+};
+
+// ---- 初始化 ----
+(async () => {
+  const c = await fetch('/api/config').then(r => r.json());
+  cfg = c;
+  const ne = c.netease || {};
+  $('#neEnabled').checked = !!ne.enabled;
+  const ex = c.extapi || {};
+  $('#extEnabled').checked = !!ex.enabled;
+  $('#extUrl').value = ex.url || '';
+  $('#roomInput').value = c.room_id || '';
+  $('#overlayLink').href = '/overlay?bg=1';
+  connect();
+  refresh();
+  setInterval(refresh, 4000);
+  logLine('控制台就绪 · http://' + location.host);
+})();
+</script>
+</body>
+</html>

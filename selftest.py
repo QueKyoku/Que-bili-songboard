@@ -1,0 +1,1964 @@
+"""自检脚本：离线验证指令解析、队列规则、协议编解码；--live 额外做真连测试。
+
+    python selftest.py
+    python selftest.py --live 12345        # 真连一个直播间，看 20 秒弹幕
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import sys
+import time
+import zlib
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from songboard.bilibili import (  # noqa: E402
+    BilibiliDanmaku, DemoDanmaku, encode_packet, iter_packets, _http_json,
+)
+from songboard.command import CommandParser  # noqa: E402
+from songboard.config import Config  # noqa: E402
+from songboard.models import SongState  # noqa: E402
+from songboard.store import QueueStore  # noqa: E402
+from songboard.wbi import extract_keys, get_mixin_key, sign_query  # noqa: E402
+
+PASS, FAIL = "PASS", "FAIL"
+results: list[tuple[str, bool, str]] = []
+
+
+def check(name: str, ok: bool, detail: str = "") -> None:
+    results.append((name, ok, detail))
+    print(f"  [{PASS if ok else FAIL}] {name}" + (f"  — {detail}" if detail else ""))
+
+
+# --------------------------------------------------------------------------- 指令解析
+def test_commands() -> None:
+    print("\n== 指令解析 ==")
+    cfg = Config.load(Path("__selftest_config.json"))
+    p = CommandParser(cfg)
+
+    c = p.parse("点歌 稻香")
+    check("点歌 稻香 -> add", c.action == "add" and c.song == "稻香", f"{c.action}/{c.song}")
+    c = p.parse("!点歌起风了")
+    check("!点歌起风了 -> add 起风了", c.action == "add" and c.song == "起风了", f"{c.action}/{c.song}")
+    c = p.parse("点歌：晴天")
+    check("点歌：晴天 -> add 晴天", c.action == "add" and c.song == "晴天", f"{c.action}/{c.song}")
+    c = p.parse("点歌")
+    check("只有前缀 -> add 空歌名", c.action == "add" and c.song == "", f"{c.action}/{c.song!r}")
+    c = p.parse("切歌")
+    check("切歌 -> skip", c.action == "skip", c.action)
+    c = p.parse("点歌 切歌")
+    check("点歌 切歌 -> skip", c.action == "skip", c.action)
+    c = p.parse("我的点歌")
+    check("我的点歌 -> query", c.action == "query", c.action)
+    c = p.parse("取消点歌")
+    check("取消点歌 -> cancel", c.action == "cancel", c.action)
+    c = p.parse("主播今天好帅")
+    check("普通弹幕 -> none", c.action == "none", c.action)
+
+    # 关掉切歌/查询/取消：关键词列表清空后这些指令必须失效
+    cfg2 = Config.load(Path("__selftest_off.json"))
+    cfg2["danmaku"]["skip_keywords"] = []
+    cfg2["danmaku"]["cancel_keywords"] = []
+    cfg2["danmaku"]["query_keywords"] = []
+    off = CommandParser(cfg2)
+    check("关掉后 切歌 -> none", off.parse("切歌").action == "none", off.parse("切歌").action)
+    check("关掉后 下一首 -> none", off.parse("下一首").action == "none")
+    check("关掉后 我的点歌 -> none", off.parse("我的点歌").action == "none")
+    check("关掉后 取消点歌 -> none", off.parse("取消点歌").action == "none")
+    check("关掉后 点歌 稻香 仍可用",
+          off.parse("点歌 稻香").action == "add" and off.parse("点歌 稻香").song == "稻香")
+    check("关掉后 点歌 切歌 当成歌名",
+          off.parse("点歌 切歌").action == "add" and off.parse("点歌 切歌").song == "切歌",
+          f"{off.parse('点歌 切歌').action}/{off.parse('点歌 切歌').song}")
+    check("关掉后 点歌 我的点歌 当成歌名",
+          off.parse("点歌 我的点歌").action == "add"
+          and off.parse("点歌 我的点歌").song == "我的点歌",
+          f"{off.parse('点歌 我的点歌').action}/{off.parse('点歌 我的点歌').song}")
+    check("前缀必须在开头：取消点歌稻香 不触发点歌",
+          off.parse("取消点歌稻香").action == "none",
+          off.parse("取消点歌稻香").action)
+    Path("__selftest_off.json").unlink(missing_ok=True)
+
+    check("mixin key 长度 32", len(get_mixin_key("a" * 64)) == 32)
+    keys = extract_keys({"wbi_img": {
+        "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+        "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png"}})
+    check("从 nav 提取 wbi key", keys == ("7cd084941338484aae1ad9425b84077c",
+                                          "4932caff0ff746eab6f01bf08b70ac45"), str(keys))
+    q = sign_query({"id": 123, "type": 0}, keys[0], keys[1]) if keys else ""
+    check("wbi 签名含 w_rid", "w_rid=" in q and "wts=" in q, q[:60])
+
+
+# --------------------------------------------------------------------------- 队列
+async def test_queue() -> None:
+    print("\n== 队列规则（cooldown 设为 0，另测冷却拦截）==")
+    cfg_path = Path("__selftest_store_config.json")
+    if cfg_path.exists():
+        cfg_path.unlink()
+    cfg = Config.load(cfg_path)
+    cfg["queue"]["cooldown_seconds"] = 0
+    cfg["queue"]["per_user_limit"] = 2
+    cfg["queue"]["max_size"] = 5
+    store = QueueStore(cfg, Path("__selftest_data"), persist=False)
+    events: list[str] = []
+
+    async def collect(payload):
+        events.append(payload["event"])
+
+    store.subscribe(collect)
+
+    req, res = await store.add("稻香", "阿岚", 1)
+    check("首点点歌 ok 且自动开播", res == "ok" and store.current and store.current.song == "稻香",
+          f"res={res} current={store.current.song if store.current else None}")
+    check("事件含 playing", "playing" in events, str(events))
+
+    req, res = await store.add("稻香", "老张", 2)
+    check("重复歌名被去重", res == "duplicate", res)
+
+    req, res = await store.add("起风了", "阿岚", 1)
+    check("同人第二首 ok（未超上限）", res == "ok", res)
+
+    req, res = await store.add("成都", "阿岚", 1)
+    check("同人超过上限被拦", res == "user_limit", f"{res} active={[s.song for s in store.active()]}")
+
+    req, res = await store.add("句号", "老张", 2)
+    check("不同人 cooldown 独立", res == "ok", res)
+
+    req, res = await store.add("孤勇者", "夜航船", 3)
+    check("第三人可点", res == "ok", res)
+
+    nxt = await store.next(reason="skip")
+    check("切歌后 current 变为起风了", nxt is not None and nxt.song == "起风了",
+          nxt.song if nxt else "None")
+    check("上一首被标记 skipped",
+          any(s.song == "稻香" and s.state is SongState.SKIPPED for s in store.played))
+
+    top = next(s for s in store.active() if s.song == "句号")
+    await store.move(top.id, True)
+    check("置顶生效（排到正在播放之后）", [s.song for s in store.active()][1] == "句号",
+          str([s.song for s in store.active()]))
+
+    # 冷却单独验证：换一个不受上限影响的用户
+    cfg["queue"]["cooldown_seconds"] = 30
+    store.reset_cooldown()
+    await store.add("咸鱼", "冷却侠", 9)
+    _, res = await store.add("浮夸", "冷却侠", 9)
+    check("冷却期内第二次被拦", res == "cooldown", res)
+    cfg["queue"]["cooldown_seconds"] = 0
+
+    for i in range(6):
+        await store.add(f"歌{i}", f"路人{i}", 100 + i)
+    check("超出 max_size 进备选池", len(store.pending) >= 1,
+          f"pending={len(store.pending)} active={len(store.active())}")
+
+    snap = store.snapshot()
+    check("快照字段齐全", set(snap) >= {"current", "queue", "pending", "counts"},
+          str(list(snap)))
+    check("快照可 JSON 序列化", bool(json.dumps(snap, ensure_ascii=False)))
+
+    # 备选池在队列有空位时补位
+    await store.clear()
+    check("清空后队列为空", len(store.active()) == 0 and store.current is None)
+
+    for f in (cfg_path,):
+        f.unlink(missing_ok=True)
+    import shutil
+    shutil.rmtree("__selftest_data", ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- 协议
+def test_protocol() -> None:
+    print("\n== 弹幕协议编解码 ==")
+    auth = encode_packet({"uid": 0, "roomid": 1, "protover": 3, "key": "t"}, op=7, proto=1)
+    total = int.from_bytes(auth[:4], "big")
+    header_len = int.from_bytes(auth[4:6], "big")
+    proto = int.from_bytes(auth[6:8], "big")
+    op_code = int.from_bytes(auth[8:12], "big")     # 操作码占 4 字节
+    check("认证包 op=7 且长度自洽",
+          (total, header_len, proto, op_code) == (len(auth), 16, 1, 7) and
+          json.loads(auth[16:].decode())["roomid"] == 1,
+          f"total={total} header={header_len} proto={proto} op={op_code}")
+
+    body = json.dumps([{"cmd": "DANMU_MSG", "info": [[], "你好", [123, "阿岚"]]}]).encode("utf-8")
+    inner = encode_packet(body, op=5, proto=0)
+    outer = encode_packet(zlib.compress(inner), op=5, proto=2)
+    msgs = list(iter_packets(outer))
+    check("zlib 压缩包可解出 danmaku", len(msgs) == 1 and msgs[0]["cmd"] == "DANMU_MSG",
+          str(msgs)[:80])
+
+    single = encode_packet(body, op=5, proto=0)
+    msgs = list(iter_packets(single))
+    check("未压缩数组包可解", len(msgs) == 1 and msgs[0]["info"][1] == "你好", str(msgs)[:60])
+
+    obj = json.dumps({"cmd": "DANMU_MSG", "info": [[], "嗨", [1, "某人"]]}).encode("utf-8")
+    msgs = list(iter_packets(encode_packet(obj, op=5, proto=0)))
+    check("未压缩对象包可解", len(msgs) == 1 and msgs[0]["cmd"] == "DANMU_MSG")
+
+    multi = json.dumps([{"cmd": "A"}, {"cmd": "B"}]).encode("utf-8")
+    msgs = list(iter_packets(encode_packet(multi, op=5, proto=0)))
+    check("多消息数组拆成多条", [m["cmd"] for m in msgs] == ["A", "B"], str(msgs))
+
+    hb = encode_packet((12345).to_bytes(4, "big"), op=3, proto=1)
+    got = list(iter_packets(hb))
+    check("心跳回包解析人气值", got and got[0].get("popularity") == 12345, str(got))
+
+    check("残缺包不崩溃", list(iter_packets(b"\x00\x01")) == [])
+
+
+# --------------------------------------------------------------------------- 正在播放 / 自动下一首
+def test_media_parse() -> None:
+    print("\n== 播放器检测解析 ==")
+    from songboard.media import (MediaInfo, normalize, parse_gsm_output, pick_all_with_progress,
+                                 pick_session, read_netease_title, similarity, split_title)
+
+    # 一份仿真输出：一个正常会话 + 一个只有 PARTIAL 的空调试会话（真实踩过的坑）
+    text = (
+        "APP    : msedge.exe\n"
+        "STATE  : Playing POS: 21 DUR: 758\n"
+        "TITLE  : 起风了 ARTIST: 买辣椒也用券\n"
+        "APP    : Microsoft.WindowsSoundRecorder_8wekyb3d8bbwe!App\n"
+        "STATE  : Paused POS: 0 DUR: 0\n"
+        "TITLE  :  ARTIST:\n"
+    )
+    items = parse_gsm_output(text)
+    check("解析出有效会话（空调试会话被丢弃）", len(items) == 1, f"{len(items)} 个")
+    it = items[0]
+    check("曲名/艺人/进度解析正确",
+          it.title == "起风了" and it.artist == "买辣椒也用券"
+          and it.position == 21 and it.duration == 758,
+          f"{it.title}/{it.artist}/{it.position}/{it.duration}")
+    check("playing 状态解析正确", it.playing is True)
+
+    check("空输出不崩", parse_gsm_output("") == [] and parse_gsm_output("垃圾数据") == [])
+
+    picked = pick_session(items + parse_gsm_output(
+        "APP    : cloudmusic.exe\nSTATE  : Paused POS: 0 DUR: 0\nTITLE  : 苦瓜 ARTIST: 陈奕迅\n"
+    ), ("msedge",))
+    check("优先挑选指定的播放器", picked is not None and picked.app == "msedge.exe",
+          picked.app if picked else "None")
+
+    # ★ 关键回归：网易云网页版在 Edge 里的会话就是"有进度、没标题"，
+    #   之前因为"没标题就丢弃"导致什么都读不到，不能重现这个 bug。
+    untitled = parse_gsm_output(
+        "APP    : msedge.exe\nSTATE  : Playing POS: 30 DUR: 191\nTITLE  :  ARTIST: \n"
+    )
+    check("无标题但有进度的会话被保留（不再丢弃）", len(untitled) == 1,
+          f"{len(untitled)} 个")
+    check("无标题会话的进度解析正确",
+          untitled and untitled[0].position == 30 and untitled[0].duration == 191,
+          f"{untitled[0].position}/{untitled[0].duration}" if untitled else "无")
+    picked_untitled = pick_session(untitled, ("msedge",))
+    check("无标题会话仍可被选为进度来源", picked_untitled is not None,
+          picked_untitled.app if picked_untitled else "None")
+    check("has_progress 判定正确",
+          picked_untitled is not None and picked_untitled.has_progress is True)
+    # 回归：remaining 属性在重构时被弄丢过，导致自动切歌每轮抛异常
+    check("remaining 属性存在且算得对",
+          picked_untitled is not None and picked_untitled.remaining == 161.0,
+          f"{picked_untitled.remaining}" if picked_untitled else "无")
+    check("没有时长时 remaining 返回负数（调用方据此跳过）",
+          MediaInfo(title="x").remaining < 0,
+          f"{MediaInfo(title='x').remaining}")
+
+    # 空调试会话（无标题无进度）必须被丢弃，否则会干扰判断
+    garbage = parse_gsm_output(
+        "APP    : Microsoft.WindowsSoundRecorder_8wekyb3d8bbwe!App\n"
+        "STATE  : Paused POS: 0 DUR: 0\nTITLE  :  ARTIST: \n"
+    )
+    check("无标题无进度的空调试会话被丢弃", garbage == [], str(garbage))
+
+    # pick_all_with_progress：按 prefer 排序挑出所有带进度的
+    allprog = pick_all_with_progress(
+        untitled + parse_gsm_output(
+            "APP    : spotify.exe\nSTATE  : Playing POS: 5 DUR: 200\nTITLE  : 某歌 ARTIST: 某人\n"
+        ), ("spotify", "msedge"))
+    check("pick_all_with_progress 按 prefer 排序",
+          len(allprog) == 2 and allprog[0].app == "spotify.exe",
+          str([a.app for a in allprog]))
+
+    # 网易云窗口标题 "歌名 - 艺人"
+    check("标题拆分 苦瓜 - 陈奕迅", split_title("苦瓜 - 陈奕迅") == ("苦瓜", "陈奕迅"))
+    check("标题拆分 只有一个字段", split_title("纯音乐") == ("纯音乐", ""))
+    check("标题拆分 破折号变体", split_title("Lemon — 米津玄師") == ("Lemon", "米津玄師"))
+
+    check("相似度：完全一致", similarity("起风了", "起风了") == 1.0)
+    check("相似度：括号版本标注不影响匹配",
+          similarity("起风了", "起风了 (Live)") == 1.0,
+          f"{similarity('起风了', '起风了 (Live)'):.2f}")
+    check("相似度：包含关系给高分",
+          abs(similarity("起风了", "起风了remix版") - 0.85) < 1e-6,
+          f"{similarity('起风了', '起风了remix版'):.2f}")
+    check("相似度：大小写/空格/标点无关",
+          similarity("Lemon", "lemon") == 1.0 and similarity("海阔天空", "海阔 天空") == 1.0)
+    check("相似度：不相干的歌要低分", similarity("起风了", "孤勇者") < 0.5,
+          f"{similarity('起风了', '孤勇者'):.2f}")
+    check("normalize 去掉尾部噪声", normalize("稻香 official") == "稻香")
+
+    # 真实读取（本机有播放器才有内容，没有也不算失败）
+    live = read_netease_title()
+    if live:
+        check(f"实测读到网易云窗口标题：{live.title} - {live.artist}", bool(live.title),
+              f"来源={live.source}")
+    else:
+        print("  [SKIP] 本机没开网易云客户端，跳过窗口标题实测")
+
+
+async def test_auto_advance() -> None:
+    print("\n== 自动下一首判定 ==")
+    from songboard.config import Config as Cfg
+    from songboard.store import QueueStore as QS
+
+    path = Path("__selftest_media_config.json")
+    path.unlink(missing_ok=True)
+    cfg = Cfg.load(path)
+    cfg["queue"]["cooldown_seconds"] = 0
+    store = QS(cfg, Path("__selftest_data2"), persist=False)
+
+    await store.add("第一首", "甲", 1)
+    await store.add("第二首", "乙", 2)
+    check("第一首自动成为正在播放", store.current is not None and store.current.song == "第一首",
+          store.current.song if store.current else "None")
+    check("此时不该自动切（刚开播）",
+          store.should_auto_advance(fallback=240, grace=9) == "")
+
+    # 时长明确且已过 → 判 done
+    store.current.duration = 100
+    store.current.started_at = time.time() - 150
+    check("超过已知时长 → done", store.should_auto_advance(fallback=240, grace=9) == "done")
+
+    # 时长未知 → 用兜底值
+    store.current.duration = 0
+    store.current.started_at = time.time() - 100
+    check("时长未知时用兜底值（还没到）",
+          store.should_auto_advance(fallback=240, grace=9) == "")
+    store.current.started_at = time.time() - 260
+    check("时长未知但超过兜底值 → done",
+          store.should_auto_advance(fallback=240, grace=9) == "done")
+
+    # play_specific：播放器检测到"就是队列里这首"
+    second = [s for s in store.active() if s.song == "第二首"][0]
+    played = await store.play_specific(second.id, detected_title="第二首 - 某歌手")
+    check("play_specific 切到指定歌曲",
+          played is not None and store.current.song == "第二首", 
+          store.current.song if store.current else "None")
+    check("play_specific 记录检测到的标题", store.current.detected_title == "第二首 - 某歌手")
+    check("上一首被标记 played",
+          any(s.song == "第一首" and s.state is SongState.PLAYED for s in store.played))
+
+    idem = await store.play_specific(second.id)
+    check("play_specific 对同一首幂等", idem is not None and store.current.song == "第二首")
+
+    await store.next(reason="done")
+    check("切完后 current 为空（队列只有两首）", store.current is None,
+          store.current.song if store.current else "None")
+
+    path.unlink(missing_ok=True)
+    import shutil as _sh
+    _sh.rmtree("__selftest_data2", ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- 外部媒体源适配器
+def test_extapi_parse() -> None:
+    print("\n== 外部媒体源（字段自动识别）==")
+    from songboard.extapi import ExtApiSource, parse_external_payload, _time_to_seconds
+
+    # 各种可能的返回形状，字段名都不写死，靠自动识别
+    cases = [
+        ({"title": "稻香", "artist": "周杰伦", "position": 60, "duration": 223, "playing": True},
+         "扁平"),
+        ({"data": {"song": {"name": "起风了", "artist": "买辣椒也用券"},
+                   "progress": 90, "total": 325, "status": "playing"}}, "嵌套"),
+        ({"songName": "苦瓜", "singer": "陈奕迅", "currentTime": 30, "length": 277}, "驼峰"),
+        ({"name": "Lemon", "artists": ["米津玄師"], "played": 45, "duration": 255}, "数组艺人"),
+        ({"title": "晴天", "artist": "周杰伦", "position": "1:30", "duration": "4:29"}, "时间字符串"),
+        ({"title": "孤勇者", "position": 191000, "duration": 254000}, "毫秒"),
+    ]
+    for payload, label in cases:
+        info = parse_external_payload(payload)
+        ok = info is not None and info.title
+        detail = (f"{info.title}/{info.artist} {info.position:.0f}s/{info.duration:.0f}s"
+                  if info else "None")
+        check(f"识别 {label}", bool(ok), detail)
+
+    info = parse_external_payload(cases[0][0])
+    check("进度与时长数值正确（扁平）",
+          info is not None and info.position == 60 and info.duration == 223,
+          f"{info.position}/{info.duration}" if info else "无")
+    info = parse_external_payload(cases[4][0])
+    check("时间字符串 \"1:30\"/\"4:29\" 转成秒",
+          info is not None and info.position == 90 and info.duration == 269,
+          f"{info.position}/{info.duration}" if info else "无")
+    info = parse_external_payload(cases[5][0])
+    check("毫秒自动折算成秒",
+          info is not None and abs(info.position - 191) < 1 and abs(info.duration - 254) < 1,
+          f"{info.position}/{info.duration}" if info else "无")
+
+    # 暂停状态要能识别出来
+    info = parse_external_payload({"title": "稻香", "position": 10, "duration": 100,
+                                   "status": "paused"})
+    check("识别暂停状态", info is not None and info.playing is False,
+          f"playing={info.playing}" if info else "无")
+
+    # 认不出来的要返回 None（不能瞎猜）
+    check("空对象返回 None", parse_external_payload({}) is None)
+    # 只有进度没有歌名：**要保留**（合并逻辑靠它拿时长），但歌名是空的
+    dur_only = parse_external_payload({"position": 10, "duration": 100})
+    check("只有进度没歌名时保留记录（供合并用）",
+          dur_only is not None and dur_only.title == "" and dur_only.duration == 100,
+          f"title={dur_only.title!r} dur={dur_only.duration}" if dur_only else "None")
+    check("只有无关字段才算认不出",
+          parse_external_payload({"foo": 1, "bar": "x"}) is None)
+    check("垃圾数据返回 None", parse_external_payload("not a dict") is None
+          and parse_external_payload(None) is None)
+    check("数组取最后一条",
+          (parse_external_payload([{"title": "A"}, {"title": "B"}]) or MediaInfo()).title == "B")
+
+    # 手动字段映射（键名完全认不出来时用）
+    weird = {"xx": {"yy": "夜曲"}, "zz": 77, "ww": 300}
+    info = parse_external_payload(weird, {"title": "xx.yy", "position": "zz", "duration": "ww"})
+    check("手动字段映射生效",
+          info is not None and info.title == "夜曲" and info.position == 77,
+          f"{info.title}/{info.position}" if info else "None")
+
+    check("_time_to_seconds 各种输入",
+          _time_to_seconds(90, key="position") == 90
+          and _time_to_seconds("1:30", key="position") == 90
+          and _time_to_seconds("01:02:03", key="position") == 3723
+          and _time_to_seconds(None, key="position") == 0.0
+          and _time_to_seconds(90000, key="position") == 90.0)
+
+    # ★ PlayerCap 的真实形态：信封 + 两个接口各缺一半字段，要合并
+    from songboard.extapi import _merge_info
+    song_info = {"code": 0, "msg": "success", "player": "cloudmusicv3",
+                 "data": {"name": "句号", "singer": "G.E.M.邓紫棋",
+                          "title": "句号 - G.E.M.邓紫棋", "cover": "http://x"}}
+    all_lyrics = {"code": 0, "msg": "success", "player": "cloudmusicv3",
+                  "data": {"title": "句号 - G.E.M.邓紫棋", "duration": 235.632,
+                           "position": 42, "progress": 42, "count": 95}}
+    a = parse_external_payload(song_info)
+    b = parse_external_payload(all_lyrics)
+    check("song_info 取到纯歌名（不是合成串）",
+          a is not None and a.title == "句号" and a.artist == "G.E.M.邓紫棋",
+          f"{a.title}/{a.artist}" if a else "None")
+    check("all_lyrics 取到时长为秒", b is not None and abs(b.duration - 235.6) < 0.1,
+          f"{b.duration}" if b else "None")
+    merged = _merge_info(a, b)
+    check("合并后歌名用纯歌名、歌手/时长都保住",
+          merged.title == "句号" and merged.artist == "G.E.M.邓紫棋"
+          and abs(merged.duration - 235.6) < 0.1 and merged.position == 42,
+          f"{merged.title}/{merged.artist}/{merged.position}/{merged.duration}")
+    # 顺序反过来也要对
+    merged2 = _merge_info(b, a)
+    check("反序合并结果一致",
+          merged2.title == "句号" and merged2.artist == "G.E.M.邓紫棋"
+          and abs(merged2.duration - 235.6) < 0.1,
+          f"{merged2.title}/{merged2.artist}/{merged2.duration}")
+    # 换了歌不能继承上一首的时长
+    other = parse_external_payload(
+        {"data": {"name": "孤勇者", "singer": "陈奕迅", "duration": 254, "position": 5}})
+    cross = _merge_info(merged, other)
+    check("换歌后不继承上一首的数据",
+          cross.title == "孤勇者" and abs(cross.duration - 254) < 0.1,
+          f"{cross.title}/{cross.duration}")
+    # 只有时长的源不能把歌名弄丢
+    dur_only = parse_external_payload({"data": {"duration": 300, "position": 10}})
+    keep = _merge_info(merged, dur_only)
+    check("只有时长的源不会覆盖已有歌名", keep.title == "句号", keep.title)
+
+
+async def test_extapi_live() -> None:
+    """起一个假的外部服务，端到端验证适配器真的能轮询到并归一化。"""
+    print("\n== 外部媒体源（真实 HTTP 轮询）==")
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    from songboard.config import Config as Cfg2
+    from songboard.extapi import ExtApiSource
+
+    payload_box = {
+        "data": {"name": "夜曲", "artist": "周杰伦", "progress": 45, "duration": 227,
+                 "status": "playing"}
+    }
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps(payload_box).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    cfg = Cfg2.load(Path("__selftest_extapi.json"))
+    cfg["extapi"]["enabled"] = True
+    cfg["extapi"]["url"] = f"http://127.0.0.1:{port}/song_info"
+    cfg["extapi"]["fields"] = {}
+    src = ExtApiSource(cfg)
+
+    try:
+        info = await src.poll()
+        check("轮询到并识别出曲目",
+              info is not None and info.title == "夜曲" and info.artist == "周杰伦",
+              f"{info.title}/{info.artist}" if info else "None")
+        check("进度被当作可信来源（source=extapi）",
+              info is not None and info.source == "extapi" and info.has_progress,
+              f"source={info.source} 进度={info.position}/{info.duration}" if info else "None")
+        st = src.status()
+        check("状态显示已连接", st["alive"] is True and st["hits"] >= 1, str(st))
+
+        # 换一首，确认能跟着变
+        payload_box["data"]["name"] = "晴天"
+        payload_box["data"]["progress"] = 10
+        info2 = await src.poll()
+        check("能跟上曲目变化", info2 is not None and info2.title == "晴天",
+              info2.title if info2 else "None")
+
+        # 服务返回垃圾时不能崩，要退化成"没数据"
+        payload_box.clear()
+        payload_box.update({"garbage": "没有曲名也没有进度"})
+        info3 = await src.poll()
+        check("认不出时返回 None 而不是崩", info3 is None, str(info3))
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    # 关闭开关后不发请求
+    cfg["extapi"]["enabled"] = False
+    off = ExtApiSource(cfg)
+    check("未启用时不轮询", await off.poll() is None)
+
+    # URL 不通时也不能崩
+    cfg["extapi"]["enabled"] = True
+    cfg["extapi"]["url"] = "http://127.0.0.1:9/nowhere"
+    dead = ExtApiSource(cfg)
+    check("连接失败返回 None 不抛异常", await dead.poll() is None)
+    check("失败原因被记录", bool(dead.last_error), dead.last_error[:60])
+
+    Path("__selftest_extapi.json").unlink(missing_ok=True)
+
+
+async def test_netease_reorder() -> None:
+    """验证歌单重排逻辑——用假的网易云接口，不碰真实歌单。
+
+    复刻实测行为：add 永远插在第 1 位（imme 参数无效）。
+    """
+    print("\n== 网易云歌单重排（点歌顺序 = 播放顺序）==")
+    from pathlib import Path as P
+
+    from songboard import netease as ne_module
+    from songboard.config import Config as Cfg
+    from songboard.netease import NeteasePlaylistDriver
+
+    path = P("__selftest_reorder.json")
+    path.unlink(missing_ok=True)
+    cfg = Cfg.load(path)
+    cfg["netease"]["playlist_id"] = "999999"
+    cfg["netease"]["cookie"] = "MUSIC_U=fake"
+
+    # 假的网易云：歌单 + "加歌永远插第 1 位"
+    playlist: list[int] = []
+    calls: list[tuple[str, list[int]]] = []
+
+    def fake_weapi(p, payload, cookie):
+        calls.append((payload.get("op", "?"), [int(x) for x in __import__("json").loads(payload.get("trackIds", "[]"))]))
+        if p.endswith("/playlist/manipulate/tracks"):
+            ids = __import__("json").loads(payload["trackIds"])
+            if payload["op"] == "add":
+                for tid in ids:                    # ← 关键：插到最前
+                    if tid in playlist:
+                        playlist.remove(tid)
+                    playlist.insert(0, int(tid))
+            else:
+                for tid in ids:
+                    if int(tid) in playlist:
+                        playlist.remove(int(tid))
+            return {"code": 200}
+        if p.endswith("/v6/playlist/detail"):
+            return {"code": 200, "playlist": {
+                "tracks": [{"id": t, "name": f"曲{t}"} for t in playlist]}}
+        return {"code": 500}
+
+    original = ne_module.weapi_post
+    ne_module.weapi_post = fake_weapi
+    try:
+        d = NeteasePlaylistDriver(cfg)
+        check("歌单重排开关默认开", bool(cfg.get("netease.reorder", True)))
+
+        # 模拟：点歌顺序 11 → 22 → 33，每次"加歌"
+        for tid in (11, 22, 33):
+            await d.add_song.__wrapped__(d, f"x{tid}") if hasattr(d.add_song, "__wrapped__") else None
+            playlist.insert(0, tid)          # 直接模拟 add 的效果
+        check("模拟加歌后顺序被倒过来了（这是网易云的真实行为）",
+              playlist[:3] == [33, 22, 11], str(playlist[:3]))
+
+        # 现在重排成点歌顺序 11 → 22 → 33
+        ok, msg = d.reorder_playlist([11, 22, 33])
+        check("重排成功", ok, msg)
+        check("重排后顺序 = 点歌顺序（先点的在前）",
+              playlist[:3] == [11, 22, 33], str(playlist[:3]))
+        check("曲目总数没变（没丢歌）", len(playlist) == 3, str(playlist))
+
+        # 已经正确时不应重复写操作（读一次歌单是必要的，不算）
+        before_writes = sum(1 for op, _ in calls if op in ("add", "del"))
+        ok2, msg2 = d.reorder_playlist([11, 22, 33])
+        after_writes = sum(1 for op, _ in calls if op in ("add", "del"))
+        check("顺序已正确时不重复写歌单",
+              ok2 and msg2 == "顺序已经正确，无需调整" and after_writes == before_writes,
+              f"{msg2}（新增写操作 {after_writes - before_writes} 次）")
+
+        # 歌单里没有的歌要报错而不是乱动
+        ok3, msg3 = d.reorder_playlist([11, 999])
+        check("有歌不在歌单里时明确报错", not ok3 and "不在歌单" in msg3, msg3)
+
+        # 重复点歌时（同一 id 两次）顺序仍要正确
+        playlist.clear()
+        playlist.extend([33, 22, 11])
+        ok4, _ = d.reorder_playlist([11, 22, 33])
+        check("重排对乱序歌单同样有效", ok4 and playlist[:3] == [11, 22, 33], str(playlist[:3]))
+    finally:
+        ne_module.weapi_post = original
+        path.unlink(missing_ok=True)
+
+    # store 侧：只排出"还没播的、且已写进网易云的"歌
+    from songboard.config import Config as Cfg3
+    from songboard.models import SongState
+    from songboard.store import QueueStore
+
+    p2 = P("__selftest_reorder2.json")
+    p2.unlink(missing_ok=True)
+    cfg2 = Cfg3.load(p2)
+    cfg2["queue"]["cooldown_seconds"] = 0
+    st = QueueStore(cfg2, P("__selftest_data3"), persist=False)
+    await st.add("甲", "u1", 1)      # 自动变成 playing
+    b, _ = await st.add("乙", "u2", 2)
+    c, _ = await st.add("丙", "u3", 3)
+    st.set_netease(b.id, 1002, "乙")
+    st.set_netease(c.id, 1003, "丙")
+    queued = st.queued_netease_ids()
+    check("只排出'还没播'的歌（正在播的不算）",
+          [tid for _i, tid in queued] == [1002, 1003], str(queued))
+    check("顺序 = 点歌顺序", [i for i, _t in queued] == [b.id, c.id])
+    import shutil as _sh2
+    p2.unlink(missing_ok=True)
+    _sh2.rmtree("__selftest_data3", ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- 语法/导入
+def test_syntax() -> None:
+    """所有源码都必须能编译、所有模块都必须能导入。
+
+    这条很关键：只 import 一部分模块的话，别的模块里的语法错误
+    要等到真正启动服务时才炸（我就这么踩过一次）。
+    """
+    print("\n== 源码编译与导入 ==")
+    root = Path(__file__).resolve().parent
+    files = sorted((root / "songboard").glob("*.py")) + [root / "selftest.py"]
+    bad: list[str] = []
+    for f in files:
+        try:
+            compile(f.read_text(encoding="utf-8"), str(f), "exec")
+        except SyntaxError as exc:
+            bad.append(f"{f.name}:{exc.lineno} {exc.msg}")
+    check(f"{len(files)} 个源文件全部编译通过", not bad, "; ".join(bad[:3]))
+
+    import importlib
+    mods = [f"songboard.{p.stem}" for p in sorted((root / "songboard").glob("*.py"))
+            if p.stem not in ("__init__", "__main__")]
+    failed: list[str] = []
+    for m in mods:
+        try:
+            importlib.import_module(m)
+        except Exception as exc:
+            failed.append(f"{m}: {type(exc).__name__}: {exc}")
+    check(f"{len(mods)} 个模块全部可导入", not failed, "; ".join(failed[:3]))
+
+
+async def test_playback_authority() -> None:
+    """"播放状态以网易云为准"的行为验证。"""
+    print("\n== 播放状态以网易云为准 ==")
+    from pathlib import Path as P
+
+    from songboard.config import Config as Cfg
+    from songboard.store import QueueStore as QS
+
+    path = P("__selftest_auth.json")
+    path.unlink(missing_ok=True)
+    cfg = Cfg.load(path)
+    cfg["queue"]["cooldown_seconds"] = 0
+    st = QS(cfg, P("__selftest_data4"), persist=False)
+
+    await st.add("句号", "甲", 1)
+    await st.add("起风了", "乙", 2)
+    await st.add("孤勇者", "丙", 3)
+    check("默认 authority = netease",
+          str(cfg.get("playback.authority")) == "netease", str(cfg.get("playback.authority")))
+    check("默认不自动加歌（加歌由主播自己做）",
+          cfg.get("netease.auto_add") is False, str(cfg.get("netease.auto_add")))
+
+    before_current = st.current.song if st.current else None
+    before_states = {s.song: s.state.value for s in st.active()}
+
+    # 网易云放到队列里的第三首 → 当前指向应切过去，但状态不能变
+    item, why = await st.set_current_by_title("孤勇者", artist="陈奕迅", strict=True)
+    check("能对齐到队列里的歌", item is not None and item.song == "孤勇者", why)
+    check("当前指向已切换", st.current is not None and st.current.song == "孤勇者",
+          st.current.song if st.current else "None")
+    after_states = {s.song: s.state.value for s in st.active()}
+    check("对齐时不改变任何条目的播放状态（否则队列会乱）",
+          before_states == after_states, f"{before_states} → {after_states}")
+
+    # 带艺人后缀的标题也要能匹配（"句号" vs "句号 - G.E.M.邓紫棋"）
+    item2, _ = await st.set_current_by_title("句号 - G.E.M.邓紫棋", strict=True)
+    check("带艺人后缀的标题能匹配", item2 is not None and item2.song == "句号",
+          item2.song if item2 else "None")
+
+    # 严格模式：翻唱不能算命中（这正是"青花瓷→刘芳版"那类坑）
+    item3, why3 = await st.set_current_by_title("晴天(深情版)", strict=True)
+    check("严格模式下不相干的歌不命中", item3 is None, f"{why3}")
+    item4, _ = await st.set_current_by_title("完全无关的歌名", strict=True)
+    check("完全不相关的歌不命中", item4 is None)
+
+    # 已经是指向它时不重复动作
+    again, why5 = await st.set_current_by_title(st.current.song, strict=True)
+    check("重复对齐是幂等的", again is not None and "已经是当前曲目" in why5, why5)
+
+    import shutil as _sh3
+    path.unlink(missing_ok=True)
+    _sh3.rmtree("__selftest_data4", ignore_errors=True)
+
+
+async def test_append_last() -> None:
+    """验证"新歌加到歌单最后一位"——用假的网易云接口，不碰真实歌单。
+
+    复刻实测行为：add 永远插在第 1 位。
+    """
+    print("\n== 加歌到歌单最后一位 ==")
+    from pathlib import Path as P
+
+    from songboard import netease as ne_module
+    from songboard.config import Config as Cfg
+    from songboard.netease import NeteasePlaylistDriver
+
+    path = P("__selftest_append.json")
+    path.unlink(missing_ok=True)
+    cfg = Cfg.load(path)
+    cfg["netease"]["playlist_id"] = "888888"
+    cfg["netease"]["cookie"] = "MUSIC_U=fake"
+
+    playlist: list[int] = [1, 2, 3]          # 已有 3 首
+
+    def fake_weapi(p, payload, cookie):
+        if p.endswith("/playlist/manipulate/tracks"):
+            ids = [int(x) for x in json.loads(payload["trackIds"])]
+            if payload["op"] == "add":
+                for tid in ids:               # ← 关键：永远插第 1 位
+                    if tid in playlist:
+                        playlist.remove(tid)
+                    playlist.insert(0, tid)
+            else:
+                for tid in ids:
+                    if int(tid) in playlist:
+                        playlist.remove(int(tid))
+            return {"code": 200}
+        if p.endswith("/v6/playlist/detail"):
+            return {"code": 200, "playlist": {
+                "tracks": [{"id": t, "name": f"曲{t}"} for t in playlist]}}
+        return {"code": 500}
+
+    original = ne_module.weapi_post
+    ne_module.weapi_post = fake_weapi
+    try:
+        d = NeteasePlaylistDriver(cfg)
+        check("append_last 默认开", bool(cfg.get("netease.append_last", True)))
+        check("起始歌单顺序", playlist == [1, 2, 3], str(playlist))
+
+        # 先模拟"普通加歌"：新歌会被插到最前（这是网易云的原生行为）
+        playlist.insert(0, 99)
+        check("原生加歌会插到第 1 位（问题所在）", playlist == [99, 1, 2, 3], str(playlist))
+
+        # 用 move_to_end 把它挪到最后
+        ok, msg = d.move_to_end(99)
+        check("move_to_end 成功", ok, msg)
+        check("新歌落在了最后一位", playlist == [1, 2, 3, 99], str(playlist))
+
+        # 再加一首，确认仍然追加到末尾、且不打乱已有顺序
+        playlist.insert(0, 77)
+        ok2, _ = d.move_to_end(77)
+        check("第二首也追加到末尾", ok2 and playlist == [1, 2, 3, 99, 77], str(playlist))
+
+        # 已经在末尾时不重复操作
+        before_writes = sum(1 for _ in [0])
+        calls_before = len(playlist)
+        ok3, msg3 = d.move_to_end(77)
+        check("已在末尾时不重复写歌单", ok3 and msg3 == "已经在最后一位", msg3)
+
+        # 不在歌单里的曲目要报错
+        ok4, msg4 = d.move_to_end(12345)
+        check("不在歌单里的曲目明确报错", not ok4 and "不在歌单" in msg4, msg4)
+
+        # 空歌单 + 单曲边界
+        playlist.clear()
+        playlist.extend([5])
+        ok5, msg5 = d.move_to_end(5)
+        check("歌单只有一首时不报错", ok5, msg5)
+
+        # 顺序保持：中间的歌挪到末尾后，其余相对顺序不变
+        playlist.clear()
+        playlist.extend([10, 20, 30, 40])
+        d.move_to_end(20)
+        check("挪中间的歌到末尾，其余顺序不变",
+              playlist == [10, 30, 40, 20], str(playlist))
+    finally:
+        ne_module.weapi_post = original
+        path.unlink(missing_ok=True)
+
+
+async def test_align_continuously() -> None:
+    """回归：对齐必须**每轮都做**，不能只在"换歌"时做。
+
+    真实事故：网易云一直放着《苦瓜》没换歌，就没有"变化事件"，
+    点歌板的"正在播放"一直停在《浮夸》没对齐。
+    """
+    print("\n== 持续对齐网易云播放状态 ==")
+    from pathlib import Path as P
+
+    from songboard.config import Config as Cfg
+    from songboard.store import QueueStore as QS
+
+    path = P("__selftest_align.json")
+    path.unlink(missing_ok=True)
+    cfg = Cfg.load(path)
+    cfg["queue"]["cooldown_seconds"] = 0
+    st = QS(cfg, P("__selftest_data5"), persist=False)
+
+    await st.add("浮夸", "甲", 1)      # 直接成为"正在播放"
+    await st.add("十年", "乙", 2)
+    await st.add("红玫瑰", "丙", 3)
+    await st.add("苦瓜", "丁", 4)
+    check("初始当前指向是《浮夸》", st.current.song == "浮夸",
+          st.current.song if st.current else "None")
+
+    # 模拟"网易云在放苦瓜、但没有任何换歌事件"——第一轮轮询就该对齐
+    item, why = await st.set_current_by_title("苦瓜", strict=True)
+    check("第一轮轮询就对齐到《苦瓜》（不依赖换歌事件）",
+          item is not None and st.current.song == "苦瓜", why)
+
+    # 再模拟"主播切到队列里的另一首"，同样应该立刻对齐
+    item2, why2 = await st.set_current_by_title("红玫瑰", strict=True)
+    check("主播手动切歌后立刻对齐", item2 is not None and st.current.song == "红玫瑰", why2)
+
+    # 反复对齐同一首必须幂等（每 2 秒轮询一次，不能每轮都改状态）
+    for _ in range(3):
+        again, why3 = await st.set_current_by_title("红玫瑰", strict=True)
+        if not (again is not None and "已经是当前曲目" in why3):
+            break
+    check("反复对齐是幂等的", "已经是当前曲目" in why3, why3)
+
+    # 对齐不能破坏"谁还没播"的判定
+    states = sorted(s.song for s in st.active())
+    check("对齐后队列成员不变", states == sorted(["十年", "红玫瑰", "苦瓜", "浮夸"]), str(states))
+
+    import shutil as _sh4
+    path.unlink(missing_ok=True)
+    _sh4.rmtree("__selftest_data5", ignore_errors=True)
+
+
+async def test_queue_head() -> None:
+    """验证"只推队头一首"的设计（参考 AwooMusicBot/BiliNCM 的公开说明）。
+
+    核心：永远只把队头写进歌单，等它开始播再写下一首，
+    这样"加歌永远插第 1 位"就不会导致顺序颠倒。
+    """
+    print("\n== 只推队头一首（队头模式）==")
+    from pathlib import Path as P
+
+    from songboard.config import Config as Cfg
+    from songboard.store import QueueStore as QS
+
+    path = P("__selftest_head.json")
+    path.unlink(missing_ok=True)
+    cfg = Cfg.load(path)
+    cfg["queue"]["cooldown_seconds"] = 0
+    st = QS(cfg, P("__selftest_data6"), persist=False)
+
+    check("队头模式默认开", cfg.get("netease.queue_head_only") is True,
+          str(cfg.get("netease.queue_head_only")))
+
+    await st.add("第一首", "甲", 1)      # 直接成为"正在播放"
+    b, _ = await st.add("第二首", "乙", 2)
+    c, _ = await st.add("第三首", "丙", 3)
+
+    head = st.next_up()
+    check("队头 = 第一个等待的歌（不是最后点的）",
+          head is not None and head.song == "第二首",
+          head.song if head else "None")
+    check("还有未写入队列的歌", st.has_pending_work() is True)
+
+    # 模拟"队头已写入歌单"
+    st.set_netease(b.id, 2002, "第二首")
+    check("队头写入后 next_up 仍是它（等它播，不跳到第三首）",
+          st.next_up() is not None and st.next_up().song == "第二首",
+          st.next_up().song if st.next_up() else "None")
+
+    # 模拟"第二首开始播放"：指向它之后，队头应变成第三首
+    await st.set_current_by_title("第二首", strict=True)
+    head2 = st.next_up()
+    check("队头播了之后，队头推进到《第三首》",
+          head2 is not None and head2.song == "第三首",
+          head2.song if head2 else "None")
+
+    # 第三首还没写 → 仍有待办
+    check("第三首还没写，仍有待办", st.has_pending_work() is True)
+    st.set_netease(c.id, 2003, "第三首")
+    check("全部写完就没有待办了", st.has_pending_work() is False)
+
+    # 空队列
+    await st.clear()
+    check("队列清空后没有队头", st.next_up() is None)
+    check("队列清空后没有待办", st.has_pending_work() is False)
+
+    import shutil as _sh5
+    path.unlink(missing_ok=True)
+    _sh5.rmtree("__selftest_data6", ignore_errors=True)
+
+    # ---- 端到端：用假的网易云验证"一次只加一首、顺序正确" ----
+    from songboard import netease as ne_module
+    from songboard.netease import NeteasePlaylistDriver
+
+    p2 = P("__selftest_head2.json")
+    p2.unlink(missing_ok=True)
+    cfg2 = Cfg.load(p2)
+    cfg2["netease"]["playlist_id"] = "777777"
+    cfg2["netease"]["cookie"] = "MUSIC_U=fake"
+
+    playlist: list[int] = []
+    calls: list[str] = []
+
+    def fake_weapi(p, payload, cookie):
+        if p.endswith("/cloudsearch/get/web"):
+            import re as _re
+            m = _re.search(r"(\d+)", payload.get("s", ""))
+            tid = int(m.group(1)) if m else 1
+            return {"code": 200, "result": {"songs": [
+                {"id": tid, "name": payload.get("s", ""),
+                 "ar": [{"name": "测试歌手"}], "al": {"name": "测试专辑"}, "dt": 200000}]}}
+        if p.endswith("/playlist/manipulate/tracks"):
+            ids = [int(x) for x in json.loads(payload["trackIds"])]
+            calls.append(payload["op"])
+            if payload["op"] == "add":
+                for tid in ids:
+                    if tid in playlist:
+                        playlist.remove(tid)
+                    playlist.insert(0, tid)      # 永远插第 1 位
+            else:
+                for tid in ids:
+                    if tid in playlist:
+                        playlist.remove(tid)
+            return {"code": 200}
+        if p.endswith("/v6/playlist/detail"):
+            return {"code": 200, "playlist": {
+                "tracks": [{"id": t, "name": f"曲{t}"} for t in playlist]}}
+        return {"code": 500}
+
+    original = ne_module.weapi_post
+    ne_module.weapi_post = fake_weapi
+    try:
+        d = NeteasePlaylistDriver(cfg2)
+        # 逐首追加到末尾（append_last=True，默认行为）
+        for tid in (3001, 3002, 3003):
+            ok, msg, hit = await d.append_song(f"曲{tid}")
+            assert hit, msg
+        # 关键：逐首追加后顺序应该是**正序**（先点的在前）
+        check("逐首追加后歌单顺序是正序（先点在前）",
+              playlist == [3001, 3002, 3003], str(playlist))
+        writes = [c for c in calls if c in ("add", "del")]
+        check("追加确实用到了删除+倒序重加（网易云没有追加接口）",
+              "del" in writes, str(writes))
+        check("顺序与点歌顺序一致（FIFO）", playlist == [3001, 3002, 3003],
+              f"{playlist}")
+    finally:
+        ne_module.weapi_post = original
+        p2.unlink(missing_ok=True)
+
+
+async def test_playlist_limit() -> None:
+    """验证歌单上限与自动清理（上限 5 首，超出时先删已播）。"""
+    print("\n== 歌单上限与自动清理 ==")
+    from pathlib import Path as P
+
+    from songboard import netease as ne_module
+    from songboard.config import Config as Cfg
+    from songboard.netease import NeteasePlaylistDriver
+
+    p = P("__selftest_limit.json")
+    p.unlink(missing_ok=True)
+    cfg = Cfg.load(p)
+    cfg["netease"]["playlist_id"] = "555555"
+    cfg["netease"]["cookie"] = "MUSIC_U=fake"
+
+    playlist = [int(x) for x in range(1, 8)]   # 7 首，已超上限
+
+    def fake_weapi(path, payload, cookie):
+        if path.endswith("/playlist/manipulate/tracks"):
+            ids = [int(x) for x in json.loads(payload["trackIds"])]
+            if payload["op"] == "add":
+                for t in ids:
+                    if t in playlist:
+                        playlist.remove(t)
+                    playlist.insert(0, t)
+            else:
+                for t in ids:
+                    if t in playlist:
+                        playlist.remove(t)
+            return {"code": 200}
+        if path.endswith("/v6/playlist/detail"):
+            return {"code": 200, "playlist": {
+                "tracks": [{"id": t, "name": f"曲{t}"} for t in playlist]}}
+        if path.endswith("/cloudsearch/get/web"):
+            return {"code": 200, "result": {"songs": []}}
+        return {"code": 500}
+
+    original = ne_module.weapi_post
+    ne_module.weapi_post = fake_weapi
+    try:
+        d = NeteasePlaylistDriver(cfg)
+        check("上限配置默认 5", cfg.get("netease.max_tracks") == 5,
+              str(cfg.get("netease.max_tracks")))
+        check("prune_played 默认开", cfg.get("netease.prune_played") is True)
+
+        # delete_tracks 要能删掉指定的几首
+        ok, msg = d.delete_tracks([1, 2])
+        check("删除指定曲目生效", ok and 1 not in playlist and 2 not in playlist,
+              f"{msg} -> {playlist}")
+
+        # playlist_state 要能读到当前顺序
+        st = d.playlist_state()
+        check("能读到歌单当前顺序", [t for t, _ in st] == playlist, str(st))
+    finally:
+        ne_module.weapi_post = original
+        p.unlink(missing_ok=True)
+
+
+async def test_prune_logic() -> None:
+    """验证清理策略——**直接测真实的 _prune_playlist**。
+
+    ⚠️ 之前的版本把清理算法在这里又抄了一遍再测那份副本。抄的那份是对的，
+    而真实的 _prune_playlist 里判定写成了 `len(tracks) <= limit 就返回`，
+    导致"歌单正好满 5 首"时永远不清理、新点歌卡死。测试和实现各写一遍，
+    必然漂移——所以现在只测真实方法，让两者不可能再不一致。
+    """
+    print("\n== 清理策略（测真实 _prune_playlist）==")
+    from songboard.main import App
+    from songboard.media import read_play_queue
+
+    q = read_play_queue()
+    if q:
+        played = [x for x in q if x["played"]]
+        check("能读到播放队列并识别已播标记", True,
+              f"{len(q)} 首，其中已播 {len(played)}：{[x['name'] for x in played][:4]}")
+    else:
+        print("  [SKIP] 播放队列缓存读不到（网易云可能没在运行）")
+
+    class FakeItem:
+        def __init__(self, song: str, state: str = "waiting") -> None:
+            self.song = song
+            self.state = type("S", (), {"value": state})()
+
+    class FakeDriver:
+        def __init__(self, tracks):
+            self._tracks = list(tracks)
+            self.deleted: list[list[int]] = []
+
+        def playlist_state(self):
+            return list(self._tracks)
+
+        def delete_tracks(self, ids):
+            ids = [int(i) for i in ids]
+            self.deleted.append(ids)
+            self._tracks = [(t, n) for t, n in self._tracks if t not in ids]
+            return True, f"已删除 {len(ids)} 首"
+
+    async def run_prune(tracks, *, played_ids, board_played=(), limit=5,
+                        pending=True):
+        """造一个最小 app 对象，只借用真实的 _prune_playlist。
+
+        pending=True 表示"确实还有待写入的歌"；False 表示队列空着。
+        清理**只应该**在有 pending 时腾位置。
+        """
+        drv = FakeDriver(tracks)
+
+        class Stub:
+            played: list = []
+
+            def has_pending_work(self) -> bool:
+                return pending
+
+        stub = Stub()
+        stub.played = [FakeItem(n, "played") for n in board_played]
+
+        app = object.__new__(App)
+        app.cfg = {"netease.max_tracks": limit,
+                   "netease.prune_played": True}
+        app.loop = asyncio.get_running_loop()
+        app.driver = drv
+        app.store = stub
+        app.log_lines = []
+        app.log = lambda m: app.log_lines.append(m)
+        # played_track_ids 是模块级函数，用闭包打桩
+        import songboard.main as M
+        orig = M.played_track_ids
+        M.played_track_ids = lambda: set(played_ids)
+        try:
+            await App._prune_playlist(app)
+            # _prune_playlist 用 create_task 派发，等它跑完
+            await asyncio.sleep(0.05)
+            pending_tasks = [t for t in asyncio.all_tasks()
+                             if t is not asyncio.current_task()]
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
+        finally:
+            M.played_track_ids = orig
+        return drv
+
+    async def mk(**kw):
+        return await run_prune(**kw)
+
+    # ---- 死锁回归：歌单正好 == 上限，其中几首已播，且有新点歌等着 ----
+    # 这就是实测踩到的场景：5/5、3 首已播，新点歌永远塞不进去。
+    drv = await mk(tracks=[(i, f"曲{i}") for i in range(1, 6)],
+                   played_ids={2, 3, 4}, pending=True)
+    check("回归：歌单正好满上限且有新点歌时，已播的会被清掉",
+          bool(drv.deleted) and sorted(drv.deleted[0]) == [2, 3, 4],
+          f"deleted={drv.deleted} 剩余={drv._tracks}")
+    check("回归：清理后腾出了位置（不再是 5/5 卡死）",
+          len(drv._tracks) == 2, f"剩余 {len(drv._tracks)} 首")
+
+    # ---- ⚠️ 关键守卫：没有待写入的歌时，绝不能动歌单 ----
+    # 实测踩到的反面案例：服务启动 2 秒、还没有任何点歌时，
+    # 它就把 3 首已播歌删了 —— 那会破坏主播想重播的歌。
+    drv = await mk(tracks=[(i, f"曲{i}") for i in range(1, 6)],
+                   played_ids={2, 3, 4}, pending=False)
+    check("没有待写入的歌时不做任何删除（别乱动歌单）",
+          not drv.deleted, f"deleted={drv.deleted} 剩余={len(drv._tracks)} 首")
+
+    drv = await mk(tracks=[(i, f"曲{i}") for i in range(1, 4)],
+                   played_ids={1}, pending=False)
+    check("队列空着时即使有已播歌也不删", not drv.deleted,
+          f"deleted={drv.deleted}")
+
+    # ---- 超过上限：删到上限为止 ----
+    drv = await mk(tracks=[(i, f"曲{i}") for i in range(1, 8)],
+                   played_ids={1, 2}, pending=True)
+    check("超上限时最终压到 5 首", len(drv._tracks) == 5,
+          f"7 → {len(drv._tracks)}  deleted={drv.deleted}")
+    check("已播的优先被删", sorted(drv.deleted[0]) == [1, 2],
+          f"deleted={drv.deleted}")
+
+    # ---- 有待写入但没满：不该超前删歌 ----
+    drv = await mk(tracks=[(i, f"曲{i}") for i in range(1, 4)],
+                   played_ids={1}, pending=True)
+    check("有待写入但没超限时不删最旧的未播歌", len(drv._tracks) == 2,
+          f"剩余={drv._tracks}")
+
+    # ---- 没有已播：不该动歌单 ----
+    drv = await mk(tracks=[(i, f"曲{i}") for i in range(1, 4)],
+                   played_ids=set(), pending=True)
+    check("没有已播且未超限时不做任何删除", not drv.deleted,
+          f"deleted={drv.deleted}")
+
+    # ---- 点歌板自己记录的已播（名字匹配）也要能识别 ----
+    drv = await mk(tracks=[(1, "已播曲"), (2, "未播曲"), (3, "另一首")],
+                   played_ids=set(), board_played=["已播曲"], pending=True)
+    check("能按点歌板自身的已播记录清理",
+          any("已播曲" not in n for _t, n in drv._tracks), f"剩余={drv._tracks}")
+
+    # ---- 上限为 0/负 表示不启用上限：绝不动歌单 ----
+    for bad_limit in (0, -1):
+        drv = await mk(tracks=[(i, f"曲{i}") for i in range(1, 9)],
+                       played_ids={1, 2, 3}, limit=bad_limit, pending=True)
+        check(f"上限={bad_limit} 时完全不清理", not drv.deleted,
+              f"deleted={drv.deleted}")
+
+
+# --------------------------------------------------------------------------- 真连测试
+async def test_live(room_id: int, seconds: int = 20) -> None:
+    print(f"\n== 真连测试：直播间 {room_id} ==")
+    stats = {"danmaku": 0, "other": 0, "texts": []}
+    notices: list[str] = []
+
+    async def on_dm(ev):
+        if ev["type"] == "danmaku":
+            stats["danmaku"] += 1
+            if len(stats["texts"]) < 5:
+                stats["texts"].append(f"{ev['user']}: {ev['text']}")
+        else:
+            stats["other"] += 1
+
+    async def on_notice(m):
+        notices.append(m)
+
+    dm = BilibiliDanmaku(room_id, on_dm, on_notice)
+    task = asyncio.create_task(dm.run())
+    try:
+        for _ in range(seconds):
+            await asyncio.sleep(1)
+            if dm.connected and stats["danmaku"] >= 3:
+                break
+    finally:
+        dm.stop()
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # 收尾时 connected 会归 False（正常断开），用 ever_connected 判断本次是否真的接上过
+    check("弹幕服务器连接成功（认证通过）", dm.ever_connected, f"last_error={dm.last_error}")
+    check("收到并解析弹幕", stats["danmaku"] > 0,
+          f"{stats['danmaku']} 条；样例 {stats['texts']}")
+    if notices:
+        print(f"    · 连接日志：{notices[0]}")
+
+
+def test_probe(room_id: int) -> None:
+    print("\n== 接口探测 ==")
+    try:
+        res = _http_json("https://api.live.bilibili.com/room/v1/Room/room_init", {"id": room_id})
+        check("room_init 可用", res.get("code") == 0, f"code={res.get('code')} {res.get('message')}")
+    except Exception as exc:
+        check("room_init 可用", False, repr(exc))
+
+
+def test_ncm_bridge() -> None:
+    """播放队列桥：协议编排、事件解码、不可用时的降级。
+
+    这里**不注入**、不碰真播放器——只验证纯逻辑和"桥没装好时必须安静降级"。
+    """
+    import base64 as _b64
+
+    from songboard import ncmbridge as nb
+
+    print("\n== 播放队列桥（不注入，只验逻辑）==")
+
+    # --- 事件解码 ---
+    payload = {
+        "version": 2, "type": "redux:state", "title": "网易云音乐",
+        "trackId": "65592", "name": "单车", "artist": "陈奕迅",
+        "album": "Sound & Sight", "coverUrl": "http://p3.example/x.jpg",
+        "nextTrackId": "66282", "nextName": "浮夸",
+        "nextArtist": "陈奕迅", "nextAlbum": "U87",
+    }
+    blob = _b64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
+    ev = nb.decode_track_event(f"OK EVENT 4 203 {blob}")
+    check("能解码事件里的当前曲目", ev is not None and ev["track_id"] == "65592",
+          str(ev and ev.get("name")))
+    check("能解码事件里的下一首", ev is not None and ev["next_track_id"] == "66282",
+          str(ev and ev.get("next_name")))
+    check("能解出封面/专辑/艺人",
+          ev is not None and ev["artist"] == "陈奕迅" and ev["album"] == "Sound & Sight",
+          str(ev and ev.get("artist")))
+    check("曲目 id 统一成字符串（网易云返回的是字符串）",
+          ev is not None and isinstance(ev["track_id"], str))
+
+    # --- 各种畸形输入必须安静返回 None，不能抛 ---
+    for bad in ("", "garbage", "OK EVENT 4 203", "OK EVENT 4 203 !!!not-base64!!!",
+                "ERR nope"):
+        try:
+            got = nb.decode_track_event(bad)
+            ok = got is None
+        except Exception as exc:  # noqa: BLE001
+            ok, got = False, repr(exc)
+        check(f"畸形事件输入安静返回 None：{bad[:22]!r}", ok, str(got))
+
+    # --- 关闭时必须完全不可用且不报错 ---
+    off = nb.NeteaseBridge(enabled=False)
+    check("未启用时 available() 为 False", off.available() is False)
+    check("未启用时 status().enabled 为 False", off.status()["enabled"] is False)
+    ok, msg = off.insert_next(1)
+    check("未启用时 insert_next 不抛异常、返回失败", ok is False, msg)
+    check("未启用时 now_playing() 返回 None", off.now_playing() is None)
+
+    # --- 管道名格式必须和桥 DLL 一致（写错就永远连不上）---
+    c = nb.BridgeClient(4242)
+    check("命令管道名与桥 DLL 约定一致",
+          c.command_pipe == r"\\.\pipe\AwooNcmCefBridge-v1-4242", c.command_pipe)
+    check("事件管道名与桥 DLL 约定一致",
+          c.event_pipe == r"\\.\pipe\AwooNcmCefBridge-events-v1-4242", c.event_pipe)
+
+    # --- describe() 在桥不存在时必须给说明而不是抛 ---
+    try:
+        desc = c.describe()
+        check("桥不存在时 describe() 给出说明", bool(desc), desc[:60])
+    except Exception as exc:  # noqa: BLE001
+        check("桥不存在时 describe() 给出说明", False, repr(exc))
+
+    # --- 进程发现（网易云没开也要能返回空列表而不是炸）---
+    pids = nb.find_cloudmusic_pids()
+    check("find_cloudmusic_pids() 返回列表", isinstance(pids, list), str(pids))
+    if pids:
+        main_pid = nb.find_main_pid()
+        check("能找到网易云主进程（持有 OrpheusBrowserHost 的那个）",
+              main_pid is not None, f"pids={pids} main={main_pid}")
+        if main_pid is not None:
+            check("主进程确实持有宿主窗口", nb.has_host_window(main_pid),
+                  f"pid={main_pid}")
+            live = nb.BridgeClient(main_pid)
+            check("真实桥管道存在（说明 DLL 已注入）", live.pipe_exists())
+            check("真实桥自报就绪", live.ready(), live.describe()[:80])
+    else:
+        print("  (网易云未运行，跳过主进程/管道检查)")
+
+    # --- 配置项默认值 ---
+    from pathlib import Path as _P
+
+    cfg = Config.load(_P(__file__).resolve().parent / "__selftest_config.json")
+    check("ncm_bridge 配置默认关闭", cfg.get("ncm_bridge.enabled") is False)
+    check("ncm_bridge 默认插到下一首", cfg.get("ncm_bridge.insert_next") is True)
+    check("ncm_bridge 默认空队列直接播放",
+          cfg.get("ncm_bridge.play_if_idle") is True)
+
+
+async def test_sync_playlist_regression() -> None:
+    """回归：队列空时点的第一首（state=playing）必须能写进歌单并插队列。
+
+    踩过的三个坑，全都在这一个场景里：
+      1. `pending` 只收 state=="waiting"，而 store.add() 在队列为空时
+         会把第一首直接标成 PLAYING → 它永远写不进歌单
+      2. 修的时候误用了 `await asyncio.to_thread(self.driver.add_song, ...)`，
+         但 add_song 是 async 方法 → 拿到协程、解包 TypeError
+      3. 那个 TypeError 发生在 create_task 起的后台任务里，
+         异常没人 await，外部只看到"什么都没发生"
+    """
+    print("\n== 回归：正在播放但未入歌单的那首 ==")
+    from songboard.main import App
+    from songboard.models import SongState
+
+    class FakeDriver:
+        name = "fake"
+
+        def __init__(self):
+            self.added: list[str] = []
+            self.appended: list[str] = []
+            self._pl: list[tuple[int, str]] = []
+
+        async def test(self):
+            return True, "ok"
+
+        async def add_song(self, song, user=""):
+            self.added.append(song)
+            self._pl.append((12345, song))
+            return True, f"added {song}", {"id": 12345, "name": song,
+                                           "artists": "测试"}
+
+        async def append_song(self, song, user=""):
+            self.appended.append(song)
+            self._pl.append((12345, song))
+            return True, f"appended {song}", {"id": 12345, "name": song,
+                                              "artists": "测试"}
+
+        def playlist_state(self):
+            return list(self._pl)
+
+        def delete_tracks(self, ids):
+            self._pl = [(t, n) for t, n in self._pl
+                        if t not in {int(i) for i in ids}]
+            return True, f"deleted {len(ids)}"
+
+        def status(self):
+            return {"driver": self.name, "enabled": True}
+
+    root = Path(__file__).resolve().parent
+    cfg = Config.load(root / "config.json")
+    cfg["mode"] = "demo"
+    cfg["netease.enabled"] = True
+    cfg["netease.auto_add"] = True
+    cfg["netease.max_tracks"] = 5
+    cfg["ncm_bridge.enabled"] = True
+    # 这个用例测的是**写歌单**那条路，所以要显式关掉"只插播放队列"模式，
+    # 否则它会跟着全局配置走，配置一改测试就假失败。
+    cfg["queue_only.enabled"] = False
+    cfg["netease.write_playlist"] = True
+
+    app = App(cfg, persist=False)
+    drv = FakeDriver()
+    app.driver = drv
+
+    calls: list[tuple[str, object]] = []
+    app.bridge.available = lambda **kw: True                    # type: ignore[assignment]
+    app.bridge.now_playing = lambda: {"track_id": "1", "name": "x"}  # type: ignore[assignment]
+    app.bridge.insert_next = lambda sid: (                      # type: ignore[assignment]
+        calls.append(("insert_next", sid)), (True, "fake"))[1]
+    app.bridge.play_now = lambda sid: (                         # type: ignore[assignment]
+        calls.append(("play_now", sid)), (True, "fake"))[1]
+
+    await app.store.add("回归测试曲", "测试观众", 90261)
+    cur = app.store.current
+    check("队列空时点的第一首会立刻成为 playing（既有语义）",
+          cur is not None and cur.state is SongState.PLAYING,
+          f"state={cur.state.value if cur else None}")
+
+    await App._sync_playlist(app)
+    for _ in range(40):
+        await asyncio.sleep(0.05)
+        tasks = [t for t in asyncio.all_tasks()
+                 if t is not asyncio.current_task()]
+        if not tasks:
+            break
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    check("正在播放那首被写进了歌单（坑 1）",
+          bool(drv.added or drv.appended),
+          f"added={drv.added} appended={drv.appended}")
+    check("点歌条目回填了 netease_id",
+          bool(app.store.current and app.store.current.netease_id),
+          str(app.store.current.netease_id if app.store.current else None))
+    check("桥被调用、插到下一首",
+          any(k == "insert_next" for k, _ in calls), str(calls))
+    check("后台任务里的异常会被记进日志（坑 3）",
+          not any("异常" in str(x.get("text", "")) for x in app.log_lines),
+          str([x.get("text") for x in app.log_lines][-3:]))
+
+
+async def test_queue_only_mode() -> None:
+    """「只插播放队列」模式：绝不碰歌单，且只保队头在"下一首"。
+
+    这是主播明确要求的模式：在他保留原有歌单的前提下，
+    按点歌顺序把歌写进播放队列，且不改动歌单任何内容。
+    """
+    print("\n== 只插播放队列模式 ==")
+    from songboard.main import App
+
+    class SpyDriver:
+        """任何写歌单的调用都记为违规。"""
+
+        name = "spy"
+        cookie = "fake-cookie"
+
+        def __init__(self):
+            self.violations: list[str] = []
+            self._pl = [(1, "原有歌A"), (2, "原有歌B")]
+
+        # ---- 写歌单的三个入口，全都算违规 ----
+        async def add_song(self, song, user=""):
+            self.violations.append(f"add_song({song})")
+            return True, "SHOULD NOT HAPPEN", {"id": 999, "name": song}
+
+        async def append_song(self, song, user=""):
+            self.violations.append(f"append_song({song})")
+            return True, "SHOULD NOT HAPPEN", {"id": 999, "name": song}
+
+        def delete_tracks(self, ids):
+            self.violations.append(f"delete_tracks({ids})")
+            return True, "SHOULD NOT HAPPEN"
+
+        def reorder_playlist(self, desired, **kw):
+            self.violations.append(f"reorder_playlist({desired})")
+            return True, "SHOULD NOT HAPPEN"
+
+        # ---- 只读 ----
+        def playlist_state(self):
+            return list(self._pl)
+
+        def status(self):
+            return {"driver": self.name}
+
+    import songboard.main as M
+
+    # 搜索接口也打桩，避免真的联网。
+    # ⚠️ 每首歌必须返回**不同**的 id：真实场景里每个网易云曲目 id 是唯一的，
+    # 如果桩对每首歌都返回同一个 id，就会把"两首点歌搜到同一首"的边界情况
+    # 误当成正常路径，测试也就测不出队头推进了。
+    orig_search = M.search_song
+    _fake_ids: dict[str, int] = {}
+
+    def fake_search(kw, cookie="", limit=5):
+        if kw not in _fake_ids:
+            _fake_ids[kw] = 50000 + len(_fake_ids)
+        return [{"id": _fake_ids[kw], "name": kw, "artists": "测试"}]
+
+    M.search_song = fake_search
+
+    try:
+        root = Path(__file__).resolve().parent
+        cfg = Config.load(root / "config.json")
+        cfg["mode"] = "demo"
+        cfg["netease.enabled"] = True
+        cfg["ncm_bridge.enabled"] = True
+        cfg["queue_only.enabled"] = True
+        cfg["queue_only.play_if_idle"] = False   # 先只测插队，不测起播
+        cfg["netease.auto_add"] = True           # 故意开着，验证硬闸门仍拦住
+        cfg["netease.write_playlist"] = True     # 也故意开着
+        # 测试里连点几首要绕开限流（不然第 2 首就被 cooldown 拒了）。
+        # 注意 _cooldown_checked 参数：simulate_danmaku 那条路会传 True 跳过检查，
+        # 直接调 store.add 则默认会检查，所以必须把 cooldown 设成 0。
+        cfg["queue.cooldown_seconds"] = 0
+        cfg["queue.per_user_limit"] = 5
+
+        app = App(cfg, persist=False)
+        spy = SpyDriver()
+        app.driver = spy
+
+        inserted: list[object] = []
+        # 有状态的桩：模拟真播放器"当前下一首是谁"。
+        # 真 ensure_next 会先看"下一首"、已经在就返回 already，
+        # 桩必须照做，否则测不出"不重复插"这个关键行为。
+        player = {"current": "777", "next": None}
+
+        def fake_now_playing():
+            return {"track_id": player["current"], "name": "正在放的",
+                    "next_track_id": player["next"], "next_name": ""}
+
+        def fake_ensure_next(sid):
+            if str(sid) == str(player["next"]):
+                return True, f"《{sid}》已经在下一首", "already"
+            inserted.append(sid)
+            player["next"] = str(sid)
+            return True, "ok", "inserted"
+
+        def fake_play_now(sid):
+            inserted.append(("play", sid))
+            player["current"] = str(sid)
+            player["next"] = None
+            return True, "ok"
+
+        app.bridge.available = lambda **kw: True                  # type: ignore[assignment]
+        app.bridge.now_playing = fake_now_playing                 # type: ignore[assignment]
+        app.bridge.ensure_next = fake_ensure_next                 # type: ignore[assignment]
+        app.bridge.play_now = fake_play_now                       # type: ignore[assignment]
+
+        # 点三首
+        for name in ("队头一", "队头二", "队头三"):
+            req, why = await app.store.add(name, "测试", 1)
+            print(f"    add({name}) -> {why}")
+        print(f"    store.current = {getattr(app.store.current, 'song', None)}")
+        print(f"    store.played  = "
+              f"{[(s.song, s.state.value, s.netease_id) for s in app.store.played]}")
+
+        # 跑两轮（每轮模拟一次状态循环）
+        for _ in range(2):
+            await App._sync_queue_only(app)
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                tasks = [t for t in asyncio.all_tasks()
+                         if t is not asyncio.current_task()]
+                if not tasks:
+                    break
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        print(f"  插入调用: {inserted}")
+        print(f"  歌单写入违规: {spy.violations}")
+
+        check("歌单完全没有被写入/删除/重排（核心要求）",
+              not spy.violations, str(spy.violations))
+        check("歌单内容保持原样", spy.playlist_state() == [(1, "原有歌A"), (2, "原有歌B")],
+              str(spy.playlist_state()))
+        check("确实往播放队列插了歌", bool(inserted), str(inserted))
+
+        # 只保队头：多次轮询也不该重复插同一首
+        head_calls = [x for x in inserted if not isinstance(x, tuple)]
+        print(f"  插队次数: {len(head_calls)}（只保队头 → 应为 1）")
+        check("只插队头，不重复插（顺序才不会反）",
+              len(head_calls) == 1, f"实际 {len(head_calls)} 次: {inserted}")
+
+        # 队头播完 → 队头前进到下一首，这时才该插新的一首
+        await app.store.next(reason="test")
+        # 模拟网易云也切了歌：队头确实开始播了
+        player["current"] = str(player.pop("next") or player["current"])
+        player["next"] = None
+        for _ in range(2):
+            await App._sync_queue_only(app)
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                tasks = [t for t in asyncio.all_tasks()
+                         if t is not asyncio.current_task()]
+                if not tasks:
+                    break
+                await asyncio.gather(*tasks, return_exceptions=True)
+        head_calls2 = [x for x in inserted if not isinstance(x, tuple)]
+        print(f"  队头推进后总插队次数: {len(head_calls2)}")
+        check("队头开始播之后才插下一首",
+              len(head_calls2) == 2, str(inserted))
+        check("插的是新的队头，没有回插旧的",
+              len(set(head_calls2)) == len(head_calls2), f"{head_calls2}")
+        check("歌单依然没被动过", not spy.violations, str(spy.violations))
+
+        # 硬闸门：即使 auto_add / write_playlist 都开着，也只插队列模式说了算
+        await App._sync_playlist(app)
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            tasks = [t for t in asyncio.all_tasks()
+                     if t is not asyncio.current_task()]
+            if not tasks:
+                break
+            await asyncio.gather(*tasks, return_exceptions=True)
+        check("即使 auto_add=true，_sync_playlist 也被队列模式拦住",
+              not spy.violations, str(spy.violations))
+
+        # 清理也绝不该动歌单
+        await App._prune_playlist(app)
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            tasks = [t for t in asyncio.all_tasks()
+                     if t is not asyncio.current_task()]
+            if not tasks:
+                break
+            await asyncio.gather(*tasks, return_exceptions=True)
+        check("清理逻辑也被拦住，不删歌单里的歌",
+              not spy.violations, str(spy.violations))
+    finally:
+        M.search_song = orig_search
+
+
+async def test_queue_only_first_song() -> None:
+    """回归：队列空时点的**第一首**也必须被插进播放队列。
+
+    踩过的坑：store.add() 在队列为空时把第一首直接标成 PLAYING，
+    而队头原本只从 state=="waiting" 里挑 → 第一首被整个跳过。
+    实测：点 富士山下→十年→浮夸，结果"下一首"是十年，富士山下一直没进队列。
+    在只插播放队列模式下更致命——写歌单那条兜底路也被关掉了。
+    """
+    print("\n== 回归：只插队列模式下的第一首 ==")
+    from songboard.main import App
+
+    class NullDriver:
+        name = "null"
+        cookie = "x"
+
+        def playlist_state(self):
+            return []
+
+        def status(self):
+            return {"driver": self.name}
+
+    import songboard.main as M
+
+    orig_search = M.search_song
+    ids: dict[str, int] = {}
+
+    def fake_search(kw, cookie="", limit=5):
+        if kw not in ids:
+            ids[kw] = 60000 + len(ids)
+        return [{"id": ids[kw], "name": kw, "artists": "测试"}]
+
+    def drain():
+        async def inner():
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                tasks = [t for t in asyncio.all_tasks()
+                         if t is not asyncio.current_task()]
+                if not tasks:
+                    break
+                await asyncio.gather(*tasks, return_exceptions=True)
+        return inner()
+
+    M.search_song = fake_search
+    try:
+        root = Path(__file__).resolve().parent
+        cfg = Config.load(root / "config.json")
+        cfg["mode"] = "demo"
+        cfg["netease.enabled"] = True
+        cfg["ncm_bridge.enabled"] = True
+        cfg["queue_only.enabled"] = True
+        cfg["queue_only.play_if_idle"] = False
+        cfg["queue.cooldown_seconds"] = 0
+        cfg["queue.per_user_limit"] = 9
+
+        app = App(cfg, persist=False)
+        app.driver = NullDriver()
+
+        player = {"current": "999", "next": None}
+        inserted: list[object] = []
+
+        def fake_now_playing():
+            return {"track_id": player["current"], "name": "别的歌",
+                    "next_track_id": player["next"], "next_name": ""}
+
+        def fake_ensure_next(sid):
+            """模拟真行为：addToNext 只把歌放到"下一首"，**不会**让它开始播。
+            如果桩顺手把 current 也改了，就等于假装"一插就播"，
+            会绕过"第一首还没放就别插第二首"这道关键闸门。"""
+            if str(sid) == str(player["next"]):
+                return True, "already", "already"
+            inserted.append(sid)
+            player["next"] = str(sid)
+            return True, "ok", "inserted"
+
+        app.bridge.available = lambda **kw: True              # type: ignore[assignment]
+        app.bridge.now_playing = fake_now_playing             # type: ignore[assignment]
+        app.bridge.ensure_next = fake_ensure_next             # type: ignore[assignment]
+        app.bridge.play_now = lambda sid: (                   # type: ignore[assignment]
+            inserted.append(("play", sid)), (True, "ok"))[1]
+
+        # 队列空 → 点第一首。它会立刻变成 playing（不是 waiting）
+        await app.store.add("第一首", "观众", 1)
+        cur = app.store.current
+        check("队列空时点的第一首是 playing（既有语义）",
+              cur is not None and cur.state.value == "playing",
+              f"state={cur.state.value if cur else None}")
+
+        for _ in range(2):
+            await App._sync_queue_only(app)
+            await drain()
+
+        print(f"  插入调用: {inserted}  下一首={player['next']}")
+        check("第一首确实被插进了播放队列（不再被跳过）",
+              bool(inserted), str(inserted))
+        check("第一首拿到了 netease_id",
+              bool(app.store.current and app.store.current.netease_id),
+              str(app.store.current.netease_id if app.store.current else None))
+
+        # 再点第二首：第一首**还没开始放**，所以第二首绝不能插
+        # （插了就会把第一首从"下一首"顶掉 —— 这就是
+        #  "点了两首但只加进去一首"的成因）
+        await app.store.add("第二首", "观众", 1)
+        for _ in range(2):
+            await App._sync_queue_only(app)
+            await drain()
+        print(f"  第二首后插入调用: {inserted}  下一首={player['next']}")
+        check("第一首还没放时，第二首不抢位（不再只加进去一首）",
+              len([x for x in inserted if not isinstance(x, tuple)]) == 1,
+              str(inserted))
+
+        # 模拟第一首开始播 → 队头前进，这时才该插第二首
+        player["current"] = str(player.pop("next"))
+        player["next"] = None
+        board_cur = app.store.current
+        if board_cur is not None:
+            app.store.set_netease(board_cur.id, player["current"])  # type: ignore[arg-type]
+        # 让点歌板认为第一首在放（对齐网易云）
+        await app.store.set_current_by_title("第一首", strict=False)
+        for _ in range(2):
+            await App._sync_queue_only(app)
+            await drain()
+        print(f"  第一首开播后插入调用: {inserted}  下一首={player['next']}")
+        check("第一首开始播后才插第二首",
+              len([x for x in inserted if not isinstance(x, tuple)]) == 2,
+              str(inserted))
+    finally:
+        M.search_song = orig_search
+
+
+async def test_console_cannot_write_playlist() -> None:
+    """回归：控制台 / API 不能再把"写歌单"打开。
+
+    主播的要求是"点歌板那边的歌单控制功能去掉"，
+    所以要保证不只是 UI 没了入口，后端也**不会**接受这些字段——
+    否则留着口子就等于留了一条误开写歌单的路。
+    """
+    print("\n== 控制台不能再开启写歌单 ==")
+    import inspect
+
+    from songboard import webui
+
+    src = inspect.getsource(webui)
+    start = src.find('"/api/netease/enable"')
+    end = src.find("except Exception", start)
+    seg = src[start:end] if start >= 0 and end > start else ""
+
+    check("找到了 /api/netease/enable 处理段", bool(seg), f"{len(seg)} 字符")
+    # ⚠️ 必须找"赋值语句"而不是"出现这两个词"：
+    #    注释里正好有 "auto_add / playlist_id 故意不再暴露"，
+    #    按子串判断会把注释也算成违规（实测假失败过一次）。
+    check("不再从请求体里写 auto_add",
+          'body["auto_add"]' not in seg and "body.get(\"auto_add\")" not in seg,
+          "仍然读取 body.auto_add")
+    check("不再从请求体里写 playlist_id",
+          'body["playlist_id"]' not in seg
+          and "body.get(\"playlist_id\")" not in seg,
+          "仍然读取 body.playlist_id")
+    check("仍然保留 cookie 与 enabled（搜索/查时长要用）",
+          'cookie' in seg and 'enabled' in seg)
+
+    # 控制台页面里不该再有歌单相关控件
+    page = (Path(__file__).resolve().parent / "web" / "control.html").read_text(
+        encoding="utf-8")
+    for gone in ("nePlaylist", "neAutoAdd", "btnNeTest"):
+        check(f"控制台已移除控件 {gone}", gone not in page,
+              "仍然存在" if gone in page else "")
+
+    # 队列模式下 App 会强制把写歌单关掉（哪怕配置里被手改成 true）
+    import tempfile
+
+    from songboard.main import App
+    tmpdir = Path(tempfile.mkdtemp(prefix="songboard_cfgtest_"))
+    tmpcfg = tmpdir / "config.json"
+    tmpcfg.write_text(json.dumps({
+        "mode": "demo",
+        "queue_only": {"enabled": True},
+        "netease": {"enabled": True, "auto_add": True, "write_playlist": True},
+        "ncm_bridge": {"enabled": False},
+    }, ensure_ascii=False), encoding="utf-8")
+    tcfg = Config.load(tmpcfg)
+    App(tcfg, persist=False)
+    check("队列模式下启动会强制关掉 auto_add",
+          tcfg.get("netease.auto_add") is False,
+          str(tcfg.get("netease.auto_add")))
+    check("队列模式下启动会强制关掉 write_playlist",
+          tcfg.get("netease.write_playlist") is False,
+          str(tcfg.get("netease.write_playlist")))
+
+
+async def test_queue_gate_not_stuck() -> None:
+    """回归：队列里已有别人占着"下一首"时，新点歌不能永远排不进去。
+
+    踩过的坑：闸门原先只看内存里的 `_queue_placed_id`（"我插过谁"），
+    但**播放队列里本来就有别的歌占着"下一首"**（比如上一轮点歌插进去、
+    还没播的那首）。于是程序误以为"已经排好了、在等它播"，
+    **永远不再插新歌**——实测：点了 5 首，只有第 1 首进了队列，后 4 首一直等。
+
+    正确判定是看网易云报的"下一首"到底是不是**我们插过的点歌**。
+    """
+    print("\n== 回归：'下一首'被别人占着时不能卡死 ==")
+    from songboard.main import App
+
+    class NullDriver:
+        name = "null"
+        cookie = "x"
+
+        def playlist_state(self):
+            return []
+
+        def status(self):
+            return {"driver": self.name}
+
+    import songboard.main as M
+
+    orig_search = M.search_song
+    ids: dict[str, int] = {}
+
+    def fake_search(kw, cookie="", limit=5):
+        if kw not in ids:
+            ids[kw] = 70000 + len(ids)
+        return [{"id": ids[kw], "name": kw, "artists": "测试"}]
+
+    async def drain():
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            tasks = [t for t in asyncio.all_tasks()
+                     if t is not asyncio.current_task()]
+            if not tasks:
+                break
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    M.search_song = fake_search
+    try:
+        root = Path(__file__).resolve().parent
+        cfg = Config.load(root / "config.json")
+        cfg["mode"] = "demo"
+        cfg["netease.enabled"] = True
+        cfg["ncm_bridge.enabled"] = True
+        cfg["queue_only.enabled"] = True
+        cfg["queue_only.play_if_idle"] = False
+        cfg["queue.cooldown_seconds"] = 0
+        cfg["queue.per_user_limit"] = 9
+
+        app = App(cfg, persist=False)
+        app.driver = NullDriver()
+
+        # 播放器状态：正在放别人的歌，**下一首也被别人占着**（不是我们插的）
+        player = {"current": "111", "next": "999999"}   # 999999 不是任何点歌项
+        inserted: list[object] = []
+
+        def fake_now_playing():
+            return {"track_id": player["current"], "name": "别人的歌",
+                    "next_track_id": player["next"], "next_name": "别人占的位"}
+
+        def fake_ensure_next(sid):
+            if str(sid) == str(player["next"]):
+                return True, "already", "already"
+            inserted.append(sid)
+            player["next"] = str(sid)
+            return True, "ok", "inserted"
+
+        app.bridge.available = lambda **kw: True          # type: ignore[assignment]
+        app.bridge.now_playing = fake_now_playing         # type: ignore[assignment]
+        app.bridge.ensure_next = fake_ensure_next         # type: ignore[assignment]
+        app.bridge.play_now = lambda sid: (               # type: ignore[assignment]
+            inserted.append(("play", sid)), (True, "ok"))[1]
+
+        await app.store.add("第一首", "观众", 1)
+        for _ in range(2):
+            await App._sync_queue_only(app)
+            await drain()
+        print(f"  第一轮插入: {inserted}  下一首={player['next']}")
+        check("'下一首'被别人占着时，我们的歌仍然能插进去（不卡死）",
+              len([x for x in inserted if not isinstance(x, tuple)]) == 1,
+              f"next={player['next']}")
+
+        # 第二首：此时"下一首"已经是我们的第一首了 → 应该等，不该抢
+        await app.store.add("第二首", "观众", 1)
+        for _ in range(2):
+            await App._sync_queue_only(app)
+            await drain()
+        print(f"  第二轮插入: {inserted}  下一首={player['next']}")
+        check("'下一首'已是我们的歌时，不抢位（顺序才对）",
+              len([x for x in inserted if not isinstance(x, tuple)]) == 1,
+              str(inserted))
+
+        # 第一首开始播 → 下一首位置腾出来 → 第二首应该补上
+        player["current"] = str(player["next"])
+        player["next"] = "999999"
+        for _ in range(2):
+            await App._sync_queue_only(app)
+            await drain()
+        print(f"  第三轮插入: {inserted}  下一首={player['next']}")
+        check("第一首开始播后，第二首补上",
+              len([x for x in inserted if not isinstance(x, tuple)]) == 2,
+              str(inserted))
+    finally:
+        M.search_song = orig_search
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--live", type=int, help="真连测试用的直播间号")
+    ap.add_argument("--seconds", type=int, default=20)
+    ap.add_argument("--probe", type=int, help="只探测接口")
+    args = ap.parse_args()
+
+    print("哔哩哔哩点歌板 · 自检")
+    test_syntax()
+    test_commands()
+    asyncio.run(test_queue())
+    test_protocol()
+    test_media_parse()
+    test_extapi_parse()
+    asyncio.run(test_auto_advance())
+    asyncio.run(test_extapi_live())
+    asyncio.run(test_netease_reorder())
+    asyncio.run(test_playback_authority())
+    asyncio.run(test_append_last())
+    asyncio.run(test_align_continuously())
+    asyncio.run(test_queue_head())
+    asyncio.run(test_playlist_limit())
+    asyncio.run(test_prune_logic())
+    asyncio.run(test_sync_playlist_regression())
+    asyncio.run(test_queue_only_mode())
+    asyncio.run(test_queue_only_first_song())
+    asyncio.run(test_queue_gate_not_stuck())
+    asyncio.run(test_console_cannot_write_playlist())
+    test_ncm_bridge()
+    if args.probe:
+        test_probe(args.probe)
+    if args.live:
+        test_probe(args.live)
+        asyncio.run(test_live(args.live, args.seconds))
+    failed = [r for r in results if not r[1]]
+    print(f"\n{'=' * 50}\n共 {len(results)} 项，通过 {len(results) - len(failed)}，失败 {len(failed)}")
+    for name, _, detail in failed:
+        print(f"  FAIL: {name} — {detail}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,54 @@
+# ─────────────────────── 凭据（最重要！）───────────────────────
+# config.json 里有真实的网易云 MUSIC_U / __csrf cookie，
+# 以及你的直播间号和歌单 ID。**绝不能提交**。
+config.json
+*.cookie
+cookie.txt
+
+# ─────────────────────── 运行时数据 ───────────────────────
+data/
+logs/
+*.log
+
+# ─────────────────────── 编译产物 ───────────────────────
+build-obj/
+# MSVC 有时会把中间文件落到源码目录旁边，一并挡掉
+*.obj
+*.pdb
+*.exp
+*.lib
+*.ilk
+# 桥 DLL 是从 native/AwooNcmCefBridge.cpp 编译出来的，不入库
+bridge/*.dll
+bridge/*.pdb
+bridge/*.obj
+bridge/*.exp
+bridge/*.lib
+
+# ─────────────────────── 第三方二进制（太大，自己去下）───────────────────────
+tools/playercap/Metabox-Nexus-PlayerCap.exe
+tools/playercap/*.exe
+tools/playercap/*.zip
+
+# ─────────────────────── Python ───────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─────────────────────── 编辑器 / 系统 ───────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ─────────────────────── 自检临时配置 ───────────────────────
+__selftest_config.json
+tmp/
