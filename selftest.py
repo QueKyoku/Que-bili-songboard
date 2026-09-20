@@ -1026,6 +1026,78 @@ def test_room_diagnostics() -> None:
           "别据此判断房间没弹幕" in src)
 
 
+async def test_no_cookie_no_insert() -> None:
+    """没有 cookie 时到底卡在哪一步。
+
+    结论（也是给主播的解释）：**插播放队列这个动作本身不需要 cookie**
+    （走的是注入 DLL + CEF DevTools），但程序得先"把歌名搜成歌曲 id"，
+    而搜索接口要登录态 —— 所以没有 cookie 时，点歌板一切正常，
+    歌却永远插不进去。
+    """
+    print("\n== 没有 cookie 会怎样 ==")
+    from songboard.main import App
+    from songboard.netease import NeteaseAuthError
+
+    root = Path(__file__).resolve().parent
+    cfg = Config.load(root / "config.json")
+    cfg["mode"] = "demo"
+    cfg["queue_only.enabled"] = True
+    cfg["ncm_bridge.enabled"] = True
+    cfg["netease.enabled"] = True
+    cfg["netease.cookie"] = ""                 # 关键：没有 cookie
+
+    inserted: list = []
+    app = App(cfg, persist=False)
+    app.bridge.available = lambda **kw: True                       # type: ignore
+    app.bridge.now_playing = lambda: {"track_id": "1", "name": "别的歌"}  # type: ignore
+    app.bridge.insert_next = lambda sid: (                         # type: ignore
+        inserted.append(sid), (True, "fake"))[1]
+
+    check("没有 cookie 时 driver.cookie 是空的",
+          not str(getattr(app.driver, "cookie", "")), repr(app.driver.cookie))
+
+    await app.store.add("稻香", "观众A", 12345)
+    await App._sync_queue_only(app)
+    await _drain_tasks()
+
+    check("点歌板照样能加点歌（队列功能不依赖 cookie）",
+          any(s.song == "稻香" for s in app.store.active()),
+          str([s.song for s in app.store.active()]))
+    check("插队列被拦住：一次都没调用 insert_next", not inserted,
+          f"inserted={inserted}")
+    logs = [str(x.get("text") or "") for x in app.log_lines]
+    check("日志说明了原因（不是静默失败）",
+          any("cookie" in x for x in logs),
+          str([x for x in logs if "cookie" in x][:2]))
+
+    # 有个 cookie 但已经失效 → 另一条分支：要报"登录态无效"
+    app2 = App(cfg, persist=False)
+    cfg["netease.cookie"] = "MUSIC_U=fake"
+    app2.driver.cookie = "MUSIC_U=fake"
+    inserted2: list = []
+    app2.bridge.available = lambda **kw: True                      # type: ignore
+    app2.bridge.now_playing = lambda: {"track_id": "1", "name": "别的歌"}   # type: ignore
+    app2.bridge.insert_next = lambda sid: (                        # type: ignore
+        inserted2.append(sid), (True, "fake"))[1]
+
+    orig = None
+    import songboard.main as M
+    orig = M.search_song
+    M.search_song = lambda *a, **kw: (_ for _ in ()).throw(       # type: ignore
+        NeteaseAuthError("网易云登录态无效（code=50000005），cookie 可能已过期，请重新获取"))
+    try:
+        await app2.store.add("晴天", "观众B", 12346)
+        await App._sync_queue_only(app2)
+        await _drain_tasks()
+    finally:
+        M.search_song = orig                                       # type: ignore
+    check("cookie 失效时不插歌", not inserted2, f"inserted={inserted2}")
+    logs2 = [str(x.get("text") or "") for x in app2.log_lines]
+    check("日志明确说「登录态无效」而不是「搜不到这首歌」",
+          any("登录态无效" in x for x in logs2),
+          str([x for x in logs2 if "登录态" in x][:2]))
+
+
 def test_syntax() -> None:
     """所有源码都必须能编译、所有模块都必须能导入。
 
@@ -2522,6 +2594,7 @@ def main() -> int:
     asyncio.run(test_console_cannot_write_playlist())
     asyncio.run(test_gift_gate())
     asyncio.run(test_gift_cli_and_reload())
+    asyncio.run(test_no_cookie_no_insert())
     test_ncm_bridge()
     if args.probe:
         test_probe(args.probe)
