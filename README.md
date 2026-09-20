@@ -2,6 +2,12 @@
 
 > 弹幕点歌 → 自动排队 → **自动插进网易云播放队列** → 直播画面上实时显示点歌板
 
+仓库地址：**https://github.com/QueKyoku/Que-bili-songboard**
+
+```bash
+git clone https://github.com/QueKyoku/Que-bili-songboard.git
+```
+
 给 B 站主播用的点歌工具。观众发一条 `点歌 稻香`，程序就会把这首歌加到网易云的
 **播放队列**里，同时把点歌板作为网页叠加层显示在直播画面上。
 
