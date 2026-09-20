@@ -8,6 +8,26 @@
 > ⚠️ 本项目依赖 B 站弹幕长连接和网易云的**非官方接口**，
 > 接口一改就可能失效。补丁版本里也可能会出现"适应上游变更"的修复。
 
+## [0.2.8] - 2026-09-20
+
+### 新增
+
+- **README 新增第九章「快捷获取 Cookie」**：从「F12 → Network → Copy request
+  headers」到一条命令写完并验证，四步走完；附三种拿法的对比表、
+  检查有效性的一种方式、以及 cookie 过期时的表现。
+- **`set_cookie.py` 重写**：
+  - 从剪贴板读进来的内容，**任何形态都能认**：纯 cookie、带 `Cookie:` 前缀
+    的一行、F12「Copy request headers」的整块、`Copy as cURL` 的整条命令
+    （bash / cmd 都行）、甚至 JSON 里的 cookie 字段。
+    实现上改成**按字段名正则搜值**，不再按 `;` 拆分配对 ——
+    后者在真实粘贴内容上根本不可靠（cURL 里第一个字段名会变成
+    `-H 'cookie: MUSIC_U`）。13 种形态 + 4 个反例都有测试。
+  - **写完立刻验证**：调网易云账号接口，成功时打印
+    `✅ cookie 有效，已登录：<昵称>`，失败时说明可能的原因 ——
+    以前写完只能自己去猜有没有生效。
+  - 删掉了早已废弃的歌单逻辑（`--playlist`、以及"没填歌单 ID 就不能测试"
+    这类提示），现在只关心 cookie 能不能用。
+
 ## [0.2.7] - 2026-09-20
 
 ### 新增
@@ -214,6 +234,7 @@
 - 网易云的接口是非官方的，可能随官方改动失效。
 - 桥需要每次重新注入（网易云一重启就失效）。
 
+[0.2.8]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.4...v0.2.5

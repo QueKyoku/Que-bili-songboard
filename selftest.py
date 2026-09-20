@@ -1098,6 +1098,52 @@ async def test_no_cookie_no_insert() -> None:
           str([x for x in logs2 if "登录态" in x][:2]))
 
 
+def test_cookie_extract() -> None:
+    """set_cookie.py 从剪贴板抠 cookie：用户粘什么形态都要能认出来。
+
+    实测见过的形态：纯 cookie、带 `Cookie:` 前缀、F12「Copy request headers」
+    的整块、`Copy as cURL` 的整条命令、JSON 里嵌的 cookie。
+    以前是按 `;` 拆分配对，cURL 那种会解析成 `-H 'cookie: MUSIC_U`
+    这样的字段名，直接失败。
+    """
+    print("\n== cookie 提取（set_cookie.py） ==")
+    from set_cookie import extract_fields
+
+    MU, CS = "AbCd" * 8, "csrf123"
+    good = [
+        ("纯 cookie 字符串", f"MUSIC_U={MU}; __csrf={CS}"),
+        ("带 Cookie: 前缀", f"Cookie: MUSIC_U={MU}; __csrf={CS}"),
+        ("Copy request headers 的整块",
+         f"GET /x HTTP/1.1\nHost: music.163.com\n"
+         f"Cookie: MUSIC_U={MU}; __csrf={CS}; NMTID=z\nAccept: */*"),
+        ("Copy as cURL (bash)",
+         f"curl 'https://music.163.com/x' \\\n  -H 'cookie: MUSIC_U={MU}; __csrf={CS}'"),
+        ("Copy as cURL (cmd)",
+         f'curl "https://music.163.com/x" -H "cookie: MUSIC_U={MU}; __csrf={CS}"'),
+        ("顺序颠倒 + 多余字段",
+         f"__csrf={CS}; Hm_lvt_a=1; MUSIC_U={MU}; WM_TID=z"),
+        ("折行的 cookie", f"Cookie: __csrf={CS};\n  MUSIC_U={MU}"),
+        ("JSON 里的 cookie",
+         '{"headers":{"cookie":"MUSIC_U=' + MU + "; __csrf=" + CS + '"}}'),
+    ]
+    for label, text in good:
+        got = extract_fields(text)
+        ok = got.get("MUSIC_U") == MU and got.get("__csrf") == CS
+        check(f"能认出：{label}", ok,
+              f"MUSIC_U={len(got.get('MUSIC_U') or '')}/{len(MU)} "
+              f"__csrf={got.get('__csrf')!r}")
+
+    check("只有 MUSIC_U 时也能用（不强求 __csrf）",
+          extract_fields(f"MUSIC_U={MU}").get("MUSIC_U") == MU)
+
+    for label, text in (("整页 HTML", "<html><title>网易云音乐</title></html>"),
+                        ("没有字段名的一串值", MU),
+                        ("别的站点的 cookie", "sessionid=abc; csrftoken=def"),
+                        ("空字符串", "")):
+        got = extract_fields(text)
+        check(f"不会误认：{label}", "MUSIC_U" not in got, str(got))
+
+
 def test_syntax() -> None:
     """所有源码都必须能编译、所有模块都必须能导入。
 
@@ -2570,6 +2616,7 @@ def main() -> int:
     test_web_js()
     test_bat_files()
     test_room_diagnostics()
+    test_cookie_extract()
     test_netease_auth_codes()
     test_changelog()
     test_config_robustness()
