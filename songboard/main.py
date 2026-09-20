@@ -17,6 +17,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .bilibili import BilibiliDanmaku, DemoDanmaku
 from .command import CommandParser
 from .config import Config
@@ -1207,7 +1208,7 @@ class App:
 
         base = self.server.url
         print("=" * 62)
-        print("  哔哩哔哩点歌板 已启动")
+        print(f"  哔哩哔哩点歌板 已启动  v{__version__}")
         print(f"  控制台：   {base}/control")
         print(f"  叠加层：   {base}/overlay        （加进直播姬的浏览器源）")
         print(f"  叠加层预览：{base}/overlay?bg=1  （带背景，方便先看效果）")
@@ -1434,6 +1435,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", default=str(ROOT / "config.json"), help="配置文件路径")
     ap.add_argument("--open", action="store_true", help="启动后打开控制台")
     ap.add_argument("--no-persist", action="store_true", help="不保存队列状态到磁盘")
+    ap.add_argument("--version", action="version",
+                    version=f"songboard {__version__}")
     args = ap.parse_args(argv)
 
     cfg = Config.load(Path(args.config))

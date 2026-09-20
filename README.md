@@ -8,6 +8,9 @@
 git clone https://github.com/QueKyoku/Que-bili-songboard.git
 ```
 
+当前版本 **v0.2.1** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
+`python -m songboard --version` 可以直接问程序自己
+
 给 B 站主播用的点歌工具。观众发一条 `点歌 稻香`，程序就会把这首歌加到网易云的
 **播放队列**里，同时把点歌板作为网页叠加层显示在直播画面上。
 
@@ -37,6 +40,7 @@ git clone https://github.com/QueKyoku/Que-bili-songboard.git
 - [十一、项目结构](#十一项目结构)
 - [十二、致谢与第三方代码](#十二致谢与第三方代码)
 - [十三、许可证](#十三许可证)
+- [十四、更新日志](#十四更新日志)
 
 ---
 
@@ -620,9 +624,9 @@ python set_cookie.py --cookie "MUSIC_U=...; __csrf=..."
 ### 跑测试
 
 ```bash
-python selftest.py         # 离线自检：指令/队列/协议/门槛/清理/插队逻辑（265 项）
-python proc_check.py       # 进程级：无终端启动不会退出（7 项）
-python check_integration.py  # 集成：点歌→插队列接线（9 项，用真实桥）
+python selftest.py         # 离线自检：指令/队列/协议/门槛/插队/网页JS/配置容错
+python proc_check.py       # 进程级：无终端启动不会退出
+python check_integration.py  # 集成：点歌→插队列接线（用真实桥）
 ```
 
 ```bash
@@ -849,15 +853,23 @@ tools/
 bridge/                    编译产物（DLL，已 gitignore）
 build-obj/                 编译中间文件（已 gitignore）
 
-selftest.py                离线自检（274 项，含网页 JS 语法）
-proc_check.py              进程级检查（7 项）
+README.md                  说明文档（就是你在看的这个）
+CHANGELOG.md               更新日志
+LICENSE / THIRD_PARTY_NOTICES.md
+config.example.json        配置模板（完整默认值）
+selftest.py                离线自检
+proc_check.py              进程级检查
 e2e_check.py               端到端检查（⚠️ 有副作用）
-check_integration.py       集成检查（9 项）
+check_integration.py       集成检查
 demo_*.py                  手动演练脚本（demo_gift.py = 模拟送礼试门槛）
 diag_room.py               弹幕直连诊断
 set_cookie.py              填网易云 cookie
 启动.bat / 启动外部媒体源.bat
 ```
+
+> 各脚本具体多少条检查不写死在文档里 —— 写了就会腐烂。
+> 跑一下，最后一行自己会报。`selftest.py` 里还有一条检查盯着
+> `README`/`CHANGELOG` 与代码的版本号是否一致。
 
 ---
 
@@ -909,6 +921,20 @@ powershell -File tools\build_bridge.ps1 `
 本项目原创代码采用 **MIT 许可证**，见 [`LICENSE`](LICENSE)。
 
 第三方代码不在此许可范围内，见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+
+---
+
+## 十四、更新日志
+
+每个版本的变更都记在 [`CHANGELOG.md`](CHANGELOG.md) 里，格式参考
+Keep a Changelog，版本号走语义化版本。
+
+程序自己的版本号是 `songboard.__version__`（`python -m songboard --version`），
+`selftest.py` 里有一条检查专门盯着"它和 CHANGELOG 最新版本是否一致" ——
+免得改了功能忘了写日志。
+
+> 本项目依赖的是 B 站和网易云的**非官方接口**，接口一改就可能失效，
+> 所以补丁版本里也可能会出现"适应上游变更"的修复。
 
 ---
 

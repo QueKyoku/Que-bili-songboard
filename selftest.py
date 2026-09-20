@@ -812,6 +812,61 @@ def test_web_js() -> None:
         print("  [SKIP] 没装 node，只做了重复声明的粗筛（装 node 可做完整编译）")
 
 
+def test_changelog() -> None:
+    """版本号必须和 CHANGELOG 对得上。
+
+    这条防的是"改了功能忘了写更新日志"：版本号在代码里、日志在文档里，
+    两边一旦漂移，用户看到的就是"README 说 0.2.0，实际跑的还是 0.1.0"。
+    """
+    print("\n== 版本号与更新日志 ==")
+    import re
+
+    from songboard import __version__
+
+    root = Path(__file__).resolve().parent
+    cl = root / "CHANGELOG.md"
+    check("CHANGELOG.md 存在", cl.exists())
+    if not cl.exists():
+        return
+
+    text = cl.read_text(encoding="utf-8")
+    heads = re.findall(r"^##\s*\[?(\d+\.\d+\.\d+)\]?", text, re.M)
+    check("CHANGELOG 里至少有一个版本号标题", bool(heads), str(heads[:3]))
+
+    check("__version__ 是合法的语义化版本号",
+          re.fullmatch(r"\d+\.\d+\.\d+", __version__) is not None, __version__)
+    check(f"CHANGELOG 最新版本 == __version__（{__version__}）",
+          bool(heads) and heads[0] == __version__,
+          f"代码={__version__} 日志最新={heads[0] if heads else '无'}")
+
+    # README 顶部也写了版本号，一并盯着（三处不一致最难查）
+    readme = root / "README.md"
+    rm = re.search(r"当前版本\s*\*\*v(\d+\.\d+\.\d+)\*\*",
+                   readme.read_text(encoding="utf-8")) if readme.exists() else None
+    check("README 顶部写了版本号", rm is not None,
+          rm.group(0) if rm else "没找到「当前版本 **vX.Y.Z**」")
+    if rm:
+        check("README 的版本号 == __version__",
+              rm.group(1) == __version__,
+              f"README={rm.group(1)} 代码={__version__}")
+
+    # 版本必须是递减的，不能把 0.2.0 写在 0.2.1 后面
+    def key(v: str) -> tuple:
+        return tuple(int(x) for x in v.split("."))
+    ordered = all(key(heads[i]) > key(heads[i + 1])
+                  for i in range(len(heads) - 1))
+    check("版本从新到旧排列", ordered, str(heads))
+
+    # 最新版本必须有内容，不能只写个空标题
+    # ⚠️ 不能用 split("##") 切：正文里的 "### 修复" 也含 "##"，
+    #    会被切在 ### 处（第一次写就这么错了，只剩 20 个字符）。
+    m = re.search(r"^##\s*\[?\d+\.\d+\.\d+\]?.*?$(.*?)"
+                  r"(?=^##\s*\[?\d+\.\d+\.\d+|\Z)", text, re.M | re.S)
+    first_body = m.group(1) if m else ""
+    check("最新版本下面写了东西（不是空标题）",
+          len(first_body.strip()) > 40, f"{len(first_body.strip())} 字符")
+
+
 def test_syntax() -> None:
     """所有源码都必须能编译、所有模块都必须能导入。
 
@@ -2282,6 +2337,7 @@ def main() -> int:
     print("哔哩哔哩点歌板 · 自检")
     test_syntax()
     test_web_js()
+    test_changelog()
     test_config_robustness()
     test_commands()
     asyncio.run(test_queue())
