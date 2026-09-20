@@ -30,6 +30,16 @@ tools/playercap/Metabox-Nexus-PlayerCap.exe
 tools/playercap/*.exe
 tools/playercap/*.zip
 
+# ─────────────────────── 图形界面打包产物 ───────────────────────
+# tools/build_gui.ps1 打出来的 exe 有 20 多 MB，不适合进仓库 ——
+# 想用的话自己跑一次那个脚本（几十秒）。
+dist/
+build/
+*.spec
+网易云扫码登录.exe
+# 图形界面崩溃时写的日志（打包后没有控制台，只能落文件）
+扫码登录_错误日志.txt
+
 # ─────────────────────── Python ───────────────────────
 __pycache__/
 *.py[cod]

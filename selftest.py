@@ -1173,6 +1173,113 @@ def test_cookie_extract() -> None:
           cookies_from_response_headers(None) == "")
 
 
+def test_qrlogin() -> None:
+    """扫码登录的业务逻辑（CLI 和图形界面共用那一份）。
+
+    真实扫码（803）需要真人拿手机扫，自检里测不了 —— 但**拿到 803 之后
+    怎么从响应头里收凭据**这步是纯逻辑，必须测：
+    扫半天成功了、结果 cookie 没接住，那才是最气人的。
+    """
+    print("\n== 扫码登录逻辑 ==")
+    import songboard.qrlogin as QR
+
+    check("状态码常量齐了",
+          (QR.WAITING, QR.SCANNED, QR.CONFIRMED, QR.EXPIRED) == (801, 802, 803, 800),
+          f"{QR.WAITING}/{QR.SCANNED}/{QR.CONFIRMED}/{QR.EXPIRED}")
+    for code in (801, 802, 803, 800):
+        check(f"code={code} 有人话说明", bool(QR.STATUS_TEXT.get(code)),
+              QR.STATUS_TEXT.get(code, ""))
+
+    class FakeHeaders:
+        def __init__(self, items): self._items = items
+        def get_all(self, name): return self._items if name == "Set-Cookie" else None
+
+    # 注入一个假的接口层：不联网也能把整条流程走一遍
+    calls: list = []
+    real_post, real_raw = QR.weapi_post, QR.weapi_post_raw
+    try:
+        QR.weapi_post = lambda path, payload, cookie: (       # type: ignore
+            calls.append((path, payload)),
+            {"code": 200, "unikey": "KEY-123"})[1]
+        s = QR.QrLogin()
+        url = s.start()
+        check("start() 拿到二维码内容",
+              s.unikey == "KEY-123" and url.endswith("codekey=KEY-123"), url)
+        check("调的是 unikey 接口、type=1",
+              calls and calls[0][0] == "/login/qrcode/unikey"
+              and calls[0][1].get("type") == 1, str(calls[:1]))
+
+        # 前两次「等待扫码」，第三次「登录成功」并下发 Set-Cookie
+        seq = [(801, None), (802, None), (803, [
+            "MUSIC_U=REALTOKEN; Path=/; HttpOnly",
+            "__csrf=CSRFVAL; Path=/",
+        ])]
+        def fake_raw(path, payload, cookie):                  # type: ignore
+            code, hdrs = seq.pop(0)
+            return {"code": code}, FakeHeaders(hdrs or [])
+        QR.weapi_post_raw = fake_raw
+
+        c1, m1 = s.poll()
+        check("801 → 等待扫码", c1 == 801 and "等待扫码" in m1, f"{c1} {m1}")
+        c2, m2 = s.poll()
+        check("802 → 提示去手机上确认", c2 == 802 and "确认" in m2, f"{c2} {m2}")
+        c3, m3 = s.poll()
+        check("803 → 登录成功", c3 == 803, f"{c3} {m3}")
+        check("803 时从 Set-Cookie 里收齐了凭据",
+              "MUSIC_U=REALTOKEN" in s.cookie and "__csrf=CSRFVAL" in s.cookie,
+              s.cookie)
+        check("原始 Set-Cookie 也留着（万一没接住，好排查）",
+              len(s.raw_headers) == 2, str(s.raw_headers))
+
+        # 万一某个版本把凭据放在 body 的 cookie 字段里
+        seq = [(803, None)]
+        def fake_raw2(path, payload, cookie):                 # type: ignore
+            return ({"code": 803, "cookie": {"MUSIC_U": "FROMBODY",
+                                             "__csrf": "X", "junk": "y"}},
+                    FakeHeaders([]))
+        QR.weapi_post_raw = fake_raw2
+        s2 = QR.QrLogin()
+        s2.start()
+        s2.poll()
+        check("响应头没有时退回 body 的 cookie 字段",
+              "MUSIC_U=FROMBODY" in s2.cookie and "junk" not in s2.cookie,
+              s2.cookie)
+
+        # 过期是明确的失败，不该被当成"继续等"
+        QR.weapi_post_raw = lambda p, q, c: ({"code": 800}, FakeHeaders([]))  # type: ignore
+        s3 = QR.QrLogin()
+        s3.start()
+        code, msg = s3.poll()
+        check("800 → 过期，且给了重新生成的提示",
+              code == 800 and "重新生成" in msg, f"{code} {msg}")
+
+        bad = QR.QrLogin()
+        raised = ""
+        try:
+            bad.poll()
+        except Exception as exc:  # noqa: BLE001
+            raised = str(exc)
+        check("没 start() 就 poll() 会明确报错", "start" in raised, raised)
+    finally:
+        QR.weapi_post = real_post        # type: ignore
+        QR.weapi_post_raw = real_raw     # type: ignore
+
+    # 二维码矩阵：图形界面靠它画方块
+    if QR.qrcode_available():
+        m = QR.qr_matrix("https://music.163.com/login?codekey=TEST", border=2)
+        n = len(m)
+        check("qr_matrix 返回正方形矩阵", n > 20 and all(len(r) == n for r in m),
+              f"{n}x{len(m[0]) if m else 0}")
+        check("矩阵里有黑有白（不是全空）",
+              any(any(r) for r in m) and not all(all(r) for r in m))
+        # 三个定位角必须是黑的（二维码的硬特征，画错了就扫不出来）
+        check("左上角有定位图案", m[2][2] and m[2][3] and m[3][2], "")
+        check("右上角有定位图案", m[2][n - 3] and m[3][n - 3], "")
+        check("左下角有定位图案", m[n - 3][2] and m[n - 3][3], "")
+    else:
+        print("  [SKIP] 没装 qrcode，跳过二维码矩阵检查")
+
+
 def test_syntax() -> None:
     """所有源码都必须能编译、所有模块都必须能导入。
 
@@ -2646,6 +2753,7 @@ def main() -> int:
     test_bat_files()
     test_room_diagnostics()
     test_cookie_extract()
+    test_qrlogin()
     test_netease_auth_codes()
     test_changelog()
     test_config_robustness()

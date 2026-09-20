@@ -8,6 +8,47 @@
 > ⚠️ 本项目依赖 B 站弹幕长连接和网易云的**非官方接口**，
 > 接口一改就可能失效。补丁版本里也可能会出现"适应上游变更"的修复。
 
+## [0.4.0] - 2026-09-20
+
+### 新增
+
+- **图形界面版扫码登录：`扫码登录.pyw`，双击就能用。**
+  不用命令行、不用 F12、不用装浏览器插件 —— 双击弹出一个窗口，
+  里面直接显示二维码，手机扫一下、点确认，窗口里就变成
+  「✅ 已登录：你的昵称」。
+  - **没装 `qrcode` 也没关系**：界面上会出现「自动安装 qrcode」按钮，
+    点一下自动装好并继续
+  - 缺依赖、网络失败、二维码过期、扫完没确认……每种情况都有明确提示
+  - 会弹个错误日志：图形界面一旦崩了，用户是**什么都看不到**的
+    （窗口一闪就没），所以我们把崩溃信息落到 `扫码登录_错误日志.txt`
+    并弹框告诉用户文件在哪
+- **`tools/build_gui.ps1`：把它打包成单个 exe**（给机器上没装 Python 的人）。
+  产物约 23 MB，放到项目根目录再双击即可。
+- **`tools/check_gui.py`**：不靠截图，直接问 tkinter ——
+  窗口建起来了没、二维码画出来没（画布上几百个方块、是不是正方形）、
+  三种状态（等待扫码 / 已扫码 / 过期）能不能正确更新。
+- `songboard/qrlogin.py`：扫码登录的逻辑抽出来，
+  命令行版（`login_qrcode.py`）和图形界面版共用同一份，
+  免得两边写两遍、改一处漏一处。
+
+### 修复
+
+- **打包脚本有两个坑，都是实测踩出来的**：
+  - `$ErrorActionPreference = "Stop"` 会让 PowerShell 把
+    `python -c "import 某模块"` 的 stderr（模块没装时的 traceback）
+    当成致命错误，**脚本在"检查 PyInstaller"那一步就退出了**。
+    改成 `Continue`，靠 `$LASTEXITCODE` 判断。
+  - `--collect-subdirs` 这个参数**根本不存在**（PyInstaller 只有
+    `--collect-submodules` / `--collect-all`），写错了会直接报参数错误。
+- README 第九章的 9.1 换成图形界面版说明，项目结构和工具表都补了新文件。
+
+### 说明
+
+- `扫码登录.pyw` 双击即可运行（`.pyw` 不会弹黑色控制台窗口）；
+  打包成 exe 只是为了让**没装 Python** 的人也能用。
+- `.gitignore` 挡掉打包产物（`dist/`、`build/`、`*.spec`、exe 和错误日志）
+  —— 20 多 MB 的二进制不适合进仓库。
+
 ## [0.3.0] - 2026-09-20
 
 ### 新增
@@ -261,6 +302,7 @@
 - 网易云的接口是非官方的，可能随官方改动失效。
 - 桥需要每次重新注入（网易云一重启就失效）。
 
+[0.4.0]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.6...v0.2.7

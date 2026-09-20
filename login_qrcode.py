@@ -35,21 +35,14 @@ except Exception:  # noqa: BLE001
     pass
 
 from songboard.config import Config  # noqa: E402
-from songboard.cookies import (  # noqa: E402
-    cookies_from_response_headers, extract_fields,
+from songboard.cookies import extract_fields  # noqa: E402
+from songboard.netease import account_info  # noqa: E402
+from songboard.qrlogin import (  # noqa: E402
+    CONFIRMED, EXPIRED, QrLogin, STATUS_TEXT,
 )
-from songboard.netease import account_info, weapi_post, weapi_post_raw  # noqa: E402
 
 #: 二维码过期前给用户多久时间扫
 WAIT_SECONDS = 180
-
-STATUS = {
-    800: "二维码过期了",
-    801: "等待扫码…",
-    802: "已扫码 —— 请在手机上点「确认登录」",
-    803: "登录成功",
-    86038: "二维码已失效，重新运行本脚本",
-}
 
 
 def show_qr(url: str) -> None:
@@ -75,18 +68,14 @@ def main() -> int:
 
     cfg = Config.load(ROOT / "config.json")
 
-    # ---- 1) 拿 unikey ----
+    # ---- 1) 申请二维码 ----
+    session = QrLogin()
     try:
-        res = weapi_post("/login/qrcode/unikey", {"type": 1}, "")
+        url = session.start()
     except Exception as exc:  # noqa: BLE001
-        print(f"❌ 连不上网易云：{exc!r}")
-        return 1
-    key = str(res.get("unikey") or "")
-    if not key:
-        print(f"❌ 没能拿到二维码凭据，接口返回：{res}")
+        print(f"❌ 申请二维码失败：{exc}")
         return 1
 
-    url = f"https://music.163.com/login?codekey={key}"
     print()
     print("=" * 62)
     print("  用手机上的【网易云音乐】App 扫下面这个码")
@@ -101,35 +90,19 @@ def main() -> int:
     # ---- 2) 轮询 ----
     deadline = time.time() + WAIT_SECONDS
     last_code = None
-    cookie = ""
     while time.time() < deadline:
         try:
-            r, headers = weapi_post_raw(
-                "/login/qrcode/client/login", {"type": 1, "key": key}, "")
+            code, msg = session.poll()
         except Exception as exc:  # noqa: BLE001
             print(f"  轮询出错（继续试）：{exc!r}")
             time.sleep(2)
             continue
-        code = r.get("code")
         if code != last_code:
-            print("  " + STATUS.get(code, f"接口返回 code={code}"))
+            print("  " + msg)
             last_code = code
-        if code == 803:
-            cookie = cookies_from_response_headers(headers)
-            if not cookie:
-                # 803 了但没从响应头里拿到 —— 把线索都打出来，方便排查
-                got = headers.get_all("Set-Cookie") if headers else None
-                print("  ⚠️ 登录成功了，但没能从响应头里读到 MUSIC_U。")
-                print(f"     收到的 Set-Cookie 条目数：{len(got or [])}")
-                for one in (got or [])[:8]:
-                    print(f"       {one.split(';')[0]}")
-                if r.get("cookie"):
-                    cookie = "; ".join(
-                        f"{k}={v}" for k, v in (r.get("cookie") or {}).items()
-                        if k in ("MUSIC_U", "__csrf"))
-                    print(f"     改从 body 里的 cookie 字段拿：{'成功' if cookie else '没有'}")
+        if code == CONFIRMED:
             break
-        if code == 800:
+        if code == EXPIRED:
             print("\n二维码过期了，重新运行本脚本即可。")
             return 1
         time.sleep(1.5)
@@ -137,8 +110,14 @@ def main() -> int:
         print(f"\n等了 {WAIT_SECONDS} 秒没等到扫码，先退出了。")
         return 1
 
+    cookie = session.cookie
     if not cookie:
-        print("❌ 没拿到 cookie，写入跳过。")
+        # 登录成功了却没读到凭据 —— 把线索都打出来，方便排查
+        print("  ⚠️ 登录成功了，但没能读到 MUSIC_U。")
+        print(f"     收到的 Set-Cookie 条目数：{len(session.raw_headers)}")
+        for one in session.raw_headers[:8]:
+            print(f"       {one.split(';')[0]}")
+        print("     请把上面几行发给我，好定位。")
         return 1
 
     fields = extract_fields(cookie)
