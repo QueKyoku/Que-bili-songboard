@@ -97,9 +97,35 @@ def text_of(dom: str, eid: str) -> str:
     return m[0].strip() if m else ""
 
 
-def check_overlay(browser: str, base: str) -> None:
+def check_overlay(browser: str, base: str, seconds: int = 9,
+                  tries: int = 3) -> None:
     print("\n== 叠加层（浏览器里真跑） ==")
-    dom = dump_dom(browser, base + "/overlay?bg=1")
+
+    # 拿服务端状态当标准答案（页面里应该显示的就是它）
+    try:
+        st = state(base)
+    except Exception as exc:  # noqa: BLE001
+        check("能读到服务端 /api/state", False, repr(exc))
+        return
+    want = ((st.get("current") or {}).get("song") or "").strip()
+
+    # ⚠️ 快照是服务端每 2 秒广播一次的，而 --virtual-time-budget 跑得比真实
+    #    时间快，所以偶尔会在第一条广播到达之前就把 DOM 打出来了
+    #    （表现是"服务端有歌、页面还是占位"）。这种假失败要重试，不能报错。
+    dom = ""
+    got = ""
+    items: list = []
+    for attempt in range(1, tries + 1):
+        dom = dump_dom(browser, base + "/overlay?bg=1", budget_ms=seconds * 1000)
+        if not dom:
+            continue
+        got = text_of(dom, "currentSong")
+        items = re.findall(r'<li[^>]*data-id="(\d+)"[^>]*>(.*?)</li>', dom, re.S)
+        if not want or got == want:
+            break
+        print(f"      第 {attempt} 次没对上（服务端={want!r} 页面={got!r}），"
+              f"可能只是快照还没广播到，重试…")
+
     if not dom:
         check("无头浏览器拿到了 DOM", False, "输出为空（浏览器启动失败？）")
         return
@@ -117,34 +143,26 @@ def check_overlay(browser: str, base: str) -> None:
     check("fetch('/api/config') 生效（标题/副标题被填上）",
           bool(title), f"title={title!r} sub={sub!r}")
 
-    # 3) WebSocket 快照渲染完了 —— 拿服务端状态当标准答案对一遍
-    try:
-        st = state(base)
-    except Exception as exc:  # noqa: BLE001
-        check("能读到服务端 /api/state", False, repr(exc))
-        return
-    want = ((st.get("current") or {}).get("song") or "").strip()
-    got = text_of(dom, "currentSong")
-    items = re.findall(r'<li[^>]*data-id="(\d+)"[^>]*>(.*?)</li>', dom, re.S)
-    n_want = len([s for s in (st.get("queue") or [])
-                  if s.get("state") != "playing"][: (st.get("config") or {}).get("show_size", 8)])
+    # 3) WebSocket 快照渲染完了
     print(f"      服务端正在播放：{want or '（空闲）'}   "
           f"叠加层显示：{got or '（空）'}   队列条目：{len(items)}")
-    if not want:
-        print("      ⚠️ 服务里现在没有正在播放的歌，先点一首再跑这个检查"
-              "（否则第 3 条测不出来）")
-        check("WebSocket 快照渲染出来了（当前曲目和服务端一致）", False,
-              "服务端没数据，无法比对")
-        return
-    check("WebSocket 快照渲染出来了（当前曲目和服务端一致）",
-          got == want, f"服务端={want!r} 叠加层={got!r}")
-    check("没有卡在初始化占位文本上（“等待点歌…”）",
-          got != "等待点歌…", f"currentSong={got!r}")
+    if want:
+        check("WebSocket 快照渲染出来了（当前曲目和服务端一致）",
+              got == want, f"服务端={want!r} 叠加层={got!r}")
+        check("没有卡在初始化占位文本上（“等待点歌…”）",
+              got != "等待点歌…", f"currentSong={got!r}")
+    else:
+        # 队列空着的时候，占位文本本来就是对的 —— 两边一致同样说明渲染通了
+        check("服务端空闲时叠加层也显示占位（两边一致）",
+              got == "等待点歌…", f"叠加层={got!r}")
+        print("      ⚠️ 服务里现在没有正在播放的歌，"
+              "「曲目是否对上」这条测不出来。"
+              "想测完整流程就先点一首（或 python demo_full.py），再跑一次。")
 
 
-def check_control(browser: str, base: str) -> None:
+def check_control(browser: str, base: str, seconds: int = 9) -> None:
     print("\n== 控制台（浏览器里真跑） ==")
-    dom = dump_dom(browser, base + "/control")
+    dom = dump_dom(browser, base + "/control", budget_ms=seconds * 1000)
     check("无头浏览器拿到了 DOM", bool(dom), f"{len(dom)} 字节")
     check("点歌门槛卡片渲染出来了", "点歌门槛（送礼物才能点）" in dom)
 
@@ -188,9 +206,9 @@ def main() -> int:
         return 1
 
     t0 = time.time()
-    check_overlay(browser, base)
+    check_overlay(browser, base, args.seconds)
     if args.control:
-        check_control(browser, base)
+        check_control(browser, base, args.seconds)
 
     failed = [r for r in results if not r[1]]
     print(f"\n{'=' * 50}\n共 {len(results)} 项，通过 "

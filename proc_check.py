@@ -95,8 +95,15 @@ def main() -> int:
         else:
             results.append(("进程存活（未因 EOF 退出）", True, "5 秒内仍在运行"))
 
-        ok, html = http_ok("/overlay")
-        results.append(("叠加层可访问", ok and "点歌板" in html, html[:60]))
+        # ⚠️ 这里必须取全文再找关键字。之前只取前 80 个字符再断言
+        #    `"点歌板" in html`，而它正好在 <title> 里、大约第 79 个字符
+        #    附近 —— 文件换成 CRLF 换行就整体后移两个字符，检查当场假失败。
+        #    靠"文件开头多少字节"做断言本来就是错的。
+        ok, html = http_ok("/overlay", limit=0)
+        missing = [k for k in ("点歌板", 'id="currentSong"', 'id="queue"')
+                   if k not in html]
+        results.append(("叠加层可访问且是完整页面", ok and not missing,
+                        f"status_ok={ok} 缺少={missing or '无'}"))
         ok, _ = http_ok("/control")
         results.append(("控制台可访问", ok, ""))
         ok, raw = http_ok("/api/state", limit=0)
