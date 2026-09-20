@@ -146,6 +146,36 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # 曲名必须"严格匹配"才认可是同一首（避免翻唱误判，如 青花瓷 命中 刘芳版）
         "strict_match": True,
     },
+    "gift_gate": {
+        # 「送礼物才能点歌」门槛。默认**关闭**，不开时行为和以前完全一样。
+        #
+        # 为什么做成可配：门槛会随直播节奏变 —— 开播初期宽一点、人气高了收紧，
+        # 所以规则由主播在控制台里调，不写死。
+        "enabled": False,
+        # 判定模式：
+        #   min_total  —— 累计金额达到 min_coin 就能点（最常用）
+        #   any_paid   —— 送过任意付费礼物就行，不看金额
+        #   per_send   —— 每次点歌消耗 min_coin 额度，送礼物充值
+        #   guard_only —— 只有舰长及以上能点
+        "mode": "min_total",
+        # 门槛金额，单位"瓜子"（1000 瓜子 = 1 元）。
+        # 只对 min_total / per_send 有意义，any_paid 会忽略它。
+        "min_coin": 1000,
+        # 时效：送礼后多少秒内有效。0 = 永久有效。
+        # 想防"刷一次点一整天"就设成正数（例：300 = 5 分钟）。
+        "window_seconds": 0,
+        # 是否只认付费礼物。⚠️ 建议保持 True ——
+        # 银瓜子能送免费礼物，不过滤的话门槛形同虚设。
+        "require_paid": True,
+        # 舰长及以上是否直接放行（不受金额/时效限制）
+        "guard_always_ok": True,
+        # 舰长级别门槛：1=总督 2=提督 3=舰长（**数字越小级别越高**）
+        "guard_min_level": 3,
+        # 醒目留言（SC，本身是付费的）是否直接放行
+        "sc_always_ok": True,
+        # 若 sc_always_ok = false，SC 需要达到这个金额
+        "sc_min_coin": 0,
+    },
 }
 
 
@@ -169,7 +199,21 @@ class Config:
         path = Path(path)
         raw: dict[str, Any] = {}
         if path.exists():
-            raw = json.loads(path.read_text(encoding="utf-8") or "{}")
+            # ⚠️ 用 utf-8-sig：记事本/某些编辑器默认存成「UTF-8 带 BOM」，
+            # 文件开头多一个 \ufeff，json.loads 会直接报
+            # "Unexpected UTF-8 BOM"，报错信息完全看不出是 BOM 的问题。
+            text = path.read_text(encoding="utf-8-sig") or "{}"
+            try:
+                raw = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(
+                    f"{path} 不是合法 JSON：第 {exc.lineno} 行第 {exc.colno} 列"
+                    f" {exc.msg}\n"
+                    f"  常见原因：多了个逗号 / 少了引号 / 中文引号「」"
+                    f" / 注释（jsonc 只是文档写法，真的 JSON 不支持注释）"
+                ) from exc
+            if not isinstance(raw, dict):
+                raise SystemExit(f"{path} 的最外层必须是一个 {{ }} 对象")
         merged = _merge(DEFAULT_CONFIG, raw)
         cfg = cls(merged, path)
         if not path.exists():
@@ -177,6 +221,7 @@ class Config:
         return cfg
 
     def save(self) -> None:
+        # 统一写成不带 BOM 的 UTF-8，免得别的工具读到 BOM 再踩一次坑
         self.path.write_text(
             json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8"
         )

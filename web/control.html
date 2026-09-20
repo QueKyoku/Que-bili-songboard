@@ -157,6 +157,68 @@
       </div>
 
       <div class="card" style="margin-top:16px">
+        <h2>点歌门槛（送礼物才能点） <span class="tag" id="ggTag">未启用</span></h2>
+        <div class="row">
+          <label class="row" style="gap:6px">
+            <input type="checkbox" id="ggEnabled" /> 启用门槛
+          </label>
+        </div>
+
+        <div class="row">
+          <span style="flex:0 0 78px;color:var(--text-dim)">判定方式</span>
+          <select class="grow" id="ggMode">
+            <option value="min_total">累计金额达标就能点</option>
+            <option value="any_paid">送过任意付费礼物就行</option>
+            <option value="per_send">每次点歌消耗额度</option>
+            <option value="guard_only">只有舰长以上能点</option>
+          </select>
+        </div>
+
+        <div class="row">
+          <span style="flex:0 0 78px;color:var(--text-dim)">金额门槛</span>
+          <input class="grow" id="ggMinCoin" type="number" min="0" step="100" placeholder="1000" />
+          <span style="color:var(--text-dim);flex:0 0 auto" id="ggYuan">= 1 元</span>
+        </div>
+
+        <div class="row">
+          <span style="flex:0 0 78px;color:var(--text-dim)">有效时长</span>
+          <input class="grow" id="ggWindow" type="number" min="0" step="30" placeholder="0" />
+          <span style="color:var(--text-dim);flex:0 0 auto">秒（0 = 永久）</span>
+        </div>
+
+        <div class="row">
+          <label class="row" style="gap:6px;flex:1">
+            <input type="checkbox" id="ggRequirePaid" />
+            <span>只认付费礼物<b style="color:var(--warn)">（建议保持勾选）</b></span>
+          </label>
+        </div>
+        <div class="row">
+          <label class="row" style="gap:6px;flex:1">
+            <input type="checkbox" id="ggGuardOk" /> 舰长及以上直接放行
+          </label>
+          <label class="row" style="gap:6px;flex:1">
+            <input type="checkbox" id="ggScOk" /> 醒目留言直接放行
+          </label>
+        </div>
+
+        <div class="row">
+          <button id="btnGgSave" class="primary">保存门槛</button>
+          <button id="btnGgReset" class="ghost">清空贡献记录</button>
+        </div>
+
+        <div class="hint" id="ggHint">
+          门槛<b>默认关闭</b>，不开时行为和以前完全一样。<br/>
+          ⚠️ 「只认付费礼物」务必保持勾选 —— 银瓜子能送免费礼物，
+          不过滤的话观众送个免费辣条就拿到点歌资格。
+        </div>
+
+        <details style="margin-top:8px">
+          <summary>当前贡献排行 / 谁被拦过</summary>
+          <div id="ggBox" class="hint"></div>
+        </details>
+      </div>
+
+      <div class="card" style="margin-top:16px">
         <h2>日志</h2>
         <div id="log"></div>
         <details>
@@ -174,6 +236,14 @@
 
 <script>
 const $ = s => document.querySelector(s);
+
+// 拼 innerHTML 前必须转义：观众昵称是**用户可控**的，
+// 直接塞进去就是 XSS（哪怕只是自己看的控制台，也不该留这个洞）
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+  ));
+}
 const api = async (path, body) => {
   const res = await fetch(path, body === undefined ? undefined : {
     method: 'POST', headers: {'Content-Type':'application/json'},
@@ -291,6 +361,35 @@ function renderStatus(st){
   if (st.last_error) bits.push('最近错误：' + st.last_error);
   $('#statusLine').textContent = bits.join(' · ');
 
+  // ---- 礼物门槛状态 ----
+  const gg = st.gift_gate;
+  if (gg){
+    const tag = $('#ggTag');
+    tag.textContent = gg.enabled
+      ? ({min_total:'累计金额', any_paid:'送过付费礼物',
+          per_send:'按次消耗', guard_only:'仅舰长'}[gg.mode] || gg.mode)
+      : '未启用';
+    tag.className = 'tag ' + (gg.enabled ? 'ok' : '');
+    // 同一个提示框里同时显示"谁达标"和"谁被拦"，主播一眼能看出门槛松紧
+    const rows = [];
+    rows.push(`已知 ${gg.known_users} 人 · 付费礼物 ${gg.paid_gifts} 次 · `
+            + `免费礼物 ${gg.free_gifts} 次 · 放行 ${gg.allowed} · 拦下 ${gg.blocked}`);
+    if (gg.top && gg.top.length){
+      rows.push('— 贡献排行 —');
+      gg.top.slice(0, 8).forEach((u, i) => {
+        const gd = u.guard ? ({1:'总督',2:'提督',3:'舰长'}[u.guard] || '') : '';
+        const extra = u.spent ? `（已用 ${u.spent}，剩 ${u.remaining}）` : '';
+        rows.push(`${i+1}. ${u.name}${gd ? ' ['+gd+']' : ''} — ${u.coin} 瓜子${extra}`);
+      });
+    }
+    if (gg.recent_blocks && gg.recent_blocks.length){
+      rows.push('— 最近被拦 —');
+      gg.recent_blocks.forEach(b => rows.push(`· ${b.user}：${b.reason}`));
+    }
+    if (rows.length === 1) rows.push('（还没有收到礼物记录）');
+    $('#ggBox').innerHTML = rows.map(r => `<div>${escapeHtml(r)}</div>`).join('');
+  }
+
   const m = st.media || {};
   const det = m.detected;
   const tl = m.timeline;
@@ -403,6 +502,37 @@ $('#autoNext').onchange = async (e) => {
   await api('/api/auto_next', {enabled: e.target.checked});
   logLine('自动下一首已' + (e.target.checked ? '开启' : '关闭'));
 };
+
+// ---- 礼物门槛 ----
+// 金额门槛实时换算成"元"，避免主播填错数量级（瓜子是千进制）
+function syncGgYuan(){
+  const coin = parseInt($('#ggMinCoin').value || '0', 10) || 0;
+  $('#ggYuan').textContent = coin > 0 ? `= ${(coin/1000).toFixed(coin % 1000 ? 1 : 0)} 元` : '';
+}
+$('#ggMinCoin').addEventListener('input', syncGgYuan);
+$('#btnGgSave').onclick = async () => {
+  const body = {
+    enabled: $('#ggEnabled').checked,
+    mode: $('#ggMode').value,
+    min_coin: parseInt($('#ggMinCoin').value || '0', 10) || 0,
+    window_seconds: parseInt($('#ggWindow').value || '0', 10) || 0,
+    require_paid: $('#ggRequirePaid').checked,
+    guard_always_ok: $('#ggGuardOk').checked,
+    sc_always_ok: $('#ggScOk').checked,
+  };
+  const r = await api('/api/gift_gate', body);
+  if (!r.ok){ logLine('⚠️ 门槛保存失败：' + (r.error || '')); return; }
+  logLine('点歌门槛已保存：' + (body.enabled ? '开启' : '关闭')
+          + `（模式 ${body.mode}，门槛 ${body.min_coin} 瓜子`
+          + (body.window_seconds ? `，${body.window_seconds} 秒内有效` : '，永久有效') + '）');
+  refresh();
+};
+$('#btnGgReset').onclick = async () => {
+  if (!confirm('清空所有观众的礼物贡献记录？\n（清空后大家都变回"没送过礼"，需要重新送）')) return;
+  await api('/api/gift_gate/reset', {});
+  logLine('礼物贡献记录已清空');
+  refresh();
+};
 $('#btnExtProbe').onclick = async () => {
   const url = $('#extUrl').value.trim();
   const r = await api('/api/extapi/probe', {url});
@@ -433,6 +563,16 @@ $('#btnNeSave').onclick = async () => {
   cfg = c;
   const ne = c.netease || {};
   $('#neEnabled').checked = !!ne.enabled;
+  // 礼物门槛：从配置回填，主播能看到自己上次设的是什么
+  const gg = c.gift_gate || {};
+  $('#ggEnabled').checked = !!gg.enabled;
+  $('#ggMode').value = gg.mode || 'min_total';
+  $('#ggMinCoin').value = (gg.min_coin != null ? gg.min_coin : 1000);
+  $('#ggWindow').value = (gg.window_seconds != null ? gg.window_seconds : 0);
+  $('#ggRequirePaid').checked = gg.require_paid !== false;
+  $('#ggGuardOk').checked = gg.guard_always_ok !== false;
+  $('#ggScOk').checked = gg.sc_always_ok !== false;
+  syncGgYuan();
   const ex = c.extapi || {};
   $('#extEnabled').checked = !!ex.enabled;
   $('#extUrl').value = ex.url || '';

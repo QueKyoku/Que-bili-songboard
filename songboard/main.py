@@ -21,6 +21,7 @@ from .bilibili import BilibiliDanmaku, DemoDanmaku
 from .command import CommandParser
 from .config import Config
 from .extapi import ExtApiSource
+from .giftgate import GiftLedger
 from .media import MediaInfo, played_track_ids, read_now_playing, similarity
 from .ncmbridge import NeteaseBridge
 from .netease import build_driver, search_song
@@ -42,6 +43,10 @@ HELP = """
   mode demo|live  切换演示模式 / 直播间模式
   room 房间号     设置直播间号并重连
   ne              查看网易云歌单驱动状态
+  gift            查看点歌门槛设置
+  gift on|off     开关「送礼物才能点」
+  gift min 2000   门槛改成 2000 瓜子
+  gift list       看谁送了多少、谁有资格
   h / help        显示本帮助
   q / quit        退出
 """
@@ -56,6 +61,9 @@ class App:
         if persist:
             self.store.load_persisted()
         self.driver = build_driver(cfg)
+        # 礼物门槛：只有送过礼物的观众才能点歌。规则由主播在控制台里配。
+        # 默认关闭，不开时行为和以前完全一样。
+        self.gifts = GiftLedger(cfg)
         # 播放队列桥（可选）：点歌后直接插进网易云的播放队列。
         # 不可用时全部静默降级，不影响点歌板本身。
         self.bridge = NeteaseBridge(
@@ -667,8 +675,33 @@ class App:
         text = str(ev.get("text") or "")
         user = str(ev.get("user") or "未知")
         uid = int(ev.get("uid") or 0)
+        kind = str(ev.get("type") or "")
 
-        if ev.get("type") == "super_chat":
+        # ---------- 先把"付过费"的事件记进礼物账本 ----------
+        # ⚠️ 必须在这里记账，不能只在点歌时查 —— 送礼和点歌是两条独立的消息，
+        #    观众可能先送礼再隔几分钟点歌。
+        if kind == "gift":
+            c = self.gifts.record_gift(ev)
+            g = ev.get("gift") or {}
+            if c is not None and not bool(g.get("paid", True)) and self.gifts.require_paid:
+                self.log(f"🎁 {user} 送了免费礼物《{g.get('name')}》"
+                         f"（不计入门槛）")
+            elif c is not None:
+                self.log(f"🎁 {user} 送了《{g.get('name')}》x{g.get('num')} "
+                         f"= {g.get('total_coin')} 瓜子"
+                         f"（累计 {c.total_coin}）")
+            return
+        if kind == "guard":
+            c = self.gifts.record_guard(ev)
+            gd = ev.get("guard") or {}
+            names = {1: "总督", 2: "提督", 3: "舰长"}
+            if c is not None:
+                self.log(f"👑 {user} 开通了"
+                         f"{names.get(int(gd.get('level') or 0), '舰长')}")
+            return
+
+        if kind == "super_chat":
+            self.gifts.record_super_chat(ev)
             if text:
                 await self.store.add(text, user, uid, source="super_chat", force=True)
             return
@@ -706,10 +739,26 @@ class App:
             if not cmd.song:
                 self.reply_queue.append(f"@{user} 请在「点歌」后面写歌名")
                 return
+            # ---------- 礼物门槛 ----------
+            # 门槛未启用时 check() 直接放行，行为和以前完全一样。
+            decision = self.gifts.check(uid)
+            if not decision.ok:
+                # 日志里带上原因和当前累计，方便主播判断门槛是不是定得太严
+                contrib = decision.contribution
+                extra = f"（累计 {contrib.total_coin} 瓜子）" if contrib else "（无记录）"
+                self.log(f"🚫 {user} 点《{cmd.song}》被门槛拦下："
+                         f"{decision.reason}{extra}")
+                self.reply_queue.append(f"@{user} {decision.hint}")
+                return
             try:
                 req, result = await self.store.add(cmd.song, user, uid)
             except ValueError:
                 return
+            # 按次消耗模式：点歌成功才扣额度
+            if result == "ok" and self.gifts.enabled \
+                    and self.gifts.mode == "per_send":
+                self.gifts.spend(uid, self.gifts.min_coin)
+                self.log(f"💸 {user} 消耗 {self.gifts.min_coin} 瓜子额度")
             hints = {
                 "ok": f"@{user} 《{req.song}》已加入队列（第 {len(self.store.active())} 位）",
                 "duplicate": f"@{user} 《{req.song}》已经在队列里啦",
@@ -961,6 +1010,26 @@ class App:
         self.cfg.save()
         await self.start_listener("live", room_id)
 
+    def reload_gift_gate(self) -> None:
+        """配置改动后让礼物账本立刻生效。
+
+        账本本来就持有 cfg 引用（规则是每次判定时现读的），重建只是兜底。
+        **送礼记录必须搬过去**：主播在直播中途把门槛从 1000 调到 2000，
+        不该顺手把观众已经送过的礼物清零。
+        """
+        old = self.gifts
+        self.gifts = GiftLedger(self.cfg)
+        self.gifts.users = old.users
+        self.gifts.seen_gifts = old.seen_gifts
+        self.gifts.seen_free_gifts = old.seen_free_gifts
+        self.gifts.blocks = old.blocks
+        self.gifts.allows = old.allows
+        self.gifts.recent_blocks = old.recent_blocks
+
+    def reset_gift_gate(self) -> None:
+        """清空贡献记录（主播换规则时可能想重新算）。"""
+        self.gifts.reset()
+
     async def reload_netease(self) -> None:
         self.driver = build_driver(self.cfg)
         self.bridge = NeteaseBridge(
@@ -976,24 +1045,61 @@ class App:
                 self.log(f"⚠️ 播放队列桥不可用：{self.bridge.status()['message']}")
 
     async def simulate_danmaku(self, text: str, user: str = "测试观众",
-                              uid: int = 0) -> dict[str, Any]:
-        """本地注入一条弹幕，**走真实的解析与队列逻辑**。
+                              uid: int = 0, *, kind: str = "danmaku",
+                              coin: int = 0, paid: bool = True) -> dict[str, Any]:
+        """本地注入一条事件，**走真实的解析与队列逻辑**。
 
         未开播时没有弹幕流，用这个可以完整演练点歌流程
         （和真实弹幕唯一的区别是"来源"，不绕过任何业务逻辑）。
+
+        kind 支持 danmaku / gift / guard / super_chat，
+        这样调"送礼物才能点歌"的门槛时不用真的去送礼。
         """
         text = (text or "").strip()
+        who = user or "测试观众"
+        who_uid = uid or abs(hash(who)) % 100000
+        before = len(self.reply_queue)
+
+        if kind == "gift":
+            await self.on_danmaku({
+                "type": "gift", "text": "", "user": who, "uid": who_uid,
+                "gift": {"name": text or "测试礼物", "num": 1, "price": coin,
+                         "total_coin": coin, "paid": bool(paid),
+                         "guard_level": 0, "combo": False},
+                "raw": {},
+            })
+            self.log(f"🧪 模拟礼物 {who}：{text or '测试礼物'} {coin} 瓜子"
+                     f"{'（免费）' if not paid else ''}")
+            return {"ok": True, "kind": "gift", "user": who, "coin": coin,
+                    "paid": bool(paid), "reply": ""}
+
+        if kind == "guard":
+            await self.on_danmaku({
+                "type": "guard", "text": "", "user": who, "uid": who_uid,
+                "guard": {"level": int(text or 3), "num": 1,
+                          "total_coin": coin, "name": "舰长"},
+                "raw": {},
+            })
+            self.log(f"🧪 模拟上舰 {who}：等级 {text or 3}")
+            return {"ok": True, "kind": "guard", "user": who, "reply": ""}
+
+        if kind == "super_chat":
+            await self.on_danmaku({
+                "type": "super_chat", "text": text, "user": who, "uid": who_uid,
+                "price": coin or 30, "raw": {},
+            })
+            self.log(f"🧪 模拟醒目留言 {who}：{text}（{coin or 30} 元）")
+            return {"ok": True, "kind": "super_chat", "user": who, "reply": ""}
+
         if not text:
             return {"ok": False, "error": "弹幕内容不能为空"}
-        before = len(self.reply_queue)
         await self.on_danmaku({
-            "type": "danmaku", "text": text, "user": user or "测试观众",
-            "uid": uid or abs(hash(user or "测试观众")) % 100000,
-            "medal": None, "raw": {},
+            "type": "danmaku", "text": text, "user": who,
+            "uid": who_uid, "medal": None, "raw": {},
         })
-        self.log(f"🧪 模拟弹幕 {user}：{text}")
+        self.log(f"🧪 模拟弹幕 {who}：{text}")
         reply = self.reply_queue[-1] if len(self.reply_queue) > before else ""
-        return {"ok": True, "text": text, "user": user, "reply": reply}
+        return {"ok": True, "text": text, "user": who, "reply": reply}
 
     async def set_extapi(self, enabled: bool, url: str = "") -> dict[str, Any]:
         """开启/关闭外部精确进度源，并立刻探测一次。"""
@@ -1046,28 +1152,12 @@ class App:
         ok, msg = await self.driver.test()
         return {"ok": ok, "message": msg, **self.driver.status()}
 
-    async def simulate_danmaku(self, text: str, user: str = "测试观众", uid: int = 0) -> dict[str, Any]:
-        """本地注入一条假弹幕，走真实解析与队列逻辑。
-
-        未开播时没有弹幕流，用这个也能把整条链路测一遍。
-        """
-        text = (text or "").strip()
-        if not text:
-            return {"ok": False, "error": "弹幕内容不能为空"}
-        before = len(self.reply_queue)
-        await self.on_danmaku({
-            "type": "danmaku", "text": text, "user": user or "测试观众",
-            "uid": uid or abs(hash(user or "测试观众")) % 100000,
-            "medal": None, "raw": {},
-        })
-        self.log(f"🧪 模拟弹幕：{user}：{text}")
-        reply = self.reply_queue[-1] if len(self.reply_queue) > before else ""
-        return {"ok": True, "text": text, "user": user, "reply": reply}
-
     def status(self) -> dict[str, Any]:
         st = self.listener.status() if self.listener else {"mode": self._mode, "connected": False}
         st["mode"] = self._mode
         st["netease"] = self.driver.status()
+        # 礼物门槛状态：放在这里控制台才能实时显示"谁达标了、谁被拦了"
+        st["gift_gate"] = self.gifts.status()
         # 桥状态：只在启用时才探测（探测会开管道，别拖慢每 2 秒的状态轮询）
         if self.bridge.enabled:
             self.bridge.available()
@@ -1096,6 +1186,8 @@ class App:
             "mark_done": self.mark_current_done,
             "simulate_danmaku": self.simulate_danmaku,
             "reload_netease": self.reload_netease,
+            "reload_gift_gate": self.reload_gift_gate,
+            "reset_gift_gate": self.reset_gift_gate,
             "log": self.log_lines,
         }
         self.store.subscribe(self._notify)
@@ -1153,6 +1245,83 @@ class App:
     async def _on_client_message(self, msg: dict[str, Any]) -> None:
         if msg.get("type") == "ping" and self.server:
             self.server.broadcast({"event": "pong"})
+
+    def _gift_cli(self, arg: str) -> None:
+        """命令行版的礼物门槛设置（等价于控制台那张卡片）。
+
+            gift                看当前设置
+            gift on / off       开关门槛
+            gift min 2000       改门槛金额（会切到 min_total）
+            gift mode any_paid  改门槛方式
+            gift window 600     送礼后 600 秒内有效（0=永久）
+            gift paid on|off    是否只认付费礼物
+            gift guard on|off   舰长是否直接放行
+            gift list           看谁已经达标
+            gift reset          清空累计
+        """
+        parts = arg.split()
+        sub = parts[0].lower() if parts else ""
+        rest = parts[1:]
+        MODES = ("min_total", "any_paid", "per_send", "guard_only")
+
+        def show() -> None:
+            gg = self.cfg.get("gift_gate", {}) or {}
+            win = gg.get("window_seconds") or 0
+            print(f"  门槛：{'开启' if gg.get('enabled') else '关闭'}"
+                  f"  方式：{gg.get('mode')}"
+                  f"  金额：{gg.get('min_coin')} 瓜子"
+                  f"  时效：{'永久' if not win else str(win) + ' 秒'}"
+                  f"  只认付费礼物：{'是' if gg.get('require_paid') else '否'}")
+
+        def change(**kw: Any) -> None:
+            for key, val in kw.items():
+                self.cfg[f"gift_gate.{key}"] = val
+            self.cfg.save()
+            # 账本持有 cfg 引用，但重建一次更稳；reload 会保留已记下的记录
+            self.reload_gift_gate()
+            show()
+
+        if sub in ("", "status"):
+            show()
+            return
+        if sub in ("on", "off"):
+            change(enabled=sub == "on")
+            return
+        if sub == "min" and rest and rest[0].isdigit():
+            change(min_coin=int(rest[0]), mode="min_total")
+            return
+        if sub == "window" and rest and rest[0].isdigit():
+            change(window_seconds=int(rest[0]))
+            return
+        if sub == "mode" and rest and rest[0] in MODES:
+            change(mode=rest[0])
+            return
+        if sub in ("paid", "guard") and rest and rest[0] in ("on", "off"):
+            key = "require_paid" if sub == "paid" else "guard_always_ok"
+            change(**{key: rest[0] == "on"})
+            return
+        if sub == "list":
+            st = self.gifts.status()
+            top = st.get("top") or []
+            if not top:
+                print("  还没有人送过礼")
+            for row in top:
+                mark = "✓" if self.gifts.qualified(int(row.get("uid") or 0)) else "·"
+                print(f"  {mark} {row.get('name')}  累计 {row.get('coin')} 瓜子"
+                      f"  礼物 {row.get('gifts')} 个"
+                      + (f"  舰长{row.get('guard')}" if row.get("guard") else ""))
+            blocked = st.get("recent_blocks") or []
+            if blocked:
+                print("  最近被拦：")
+                for row in blocked[:5]:
+                    print(f"    {row.get('user')}  {row.get('reason')}")
+            return
+        if sub == "reset":
+            self.gifts.reset()
+            print("  贡献记录已清空")
+            return
+        print("  用法：gift [on|off|min 2000|mode any_paid|window 600"
+              "|paid on|guard on|list|reset]")
 
     async def _repl(self) -> None:
         """命令行控制台，和网页控制台等价。
@@ -1243,6 +1412,8 @@ class App:
                     print(f"    {self.bridge.describe_safe()}")
                 else:
                     print("  播放队列桥：未启用（ncm_bridge.enabled=false）")
+            elif cmd == "gift":
+                self._gift_cli(arg)
             else:
                 print("  未知指令，输入 h 看帮助")
 

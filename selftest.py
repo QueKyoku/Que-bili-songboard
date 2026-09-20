@@ -15,6 +15,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# 日志里可能带 emoji（✅ 之类）。GBK 控制台打不出来会直接抛
+# UnicodeEncodeError，把整轮自检打断、后面的用例全不跑。
+# 只放宽 errors，不改编码，免得中文在 PowerShell 里变乱码。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")       # type: ignore[union-attr]
+    except Exception:
+        pass
+
 from songboard.bilibili import (  # noqa: E402
     BilibiliDanmaku, DemoDanmaku, encode_packet, iter_packets, _http_json,
 )
@@ -31,6 +40,28 @@ results: list[tuple[str, bool, str]] = []
 def check(name: str, ok: bool, detail: str = "") -> None:
     results.append((name, ok, detail))
     print(f"  [{PASS if ok else FAIL}] {name}" + (f"  — {detail}" if detail else ""))
+
+
+async def _drain_tasks(min_seconds: float = 0.0, budget: float = 8.0) -> None:
+    """把后台任务跑干净再断言。
+
+    _sync_playlist / _sync_queue_only 把真正写入丢给 create_task 就返回了，
+    测试里不等它跑完就断言会偶发假失败。min_seconds 是给
+    「任务还没被建出来」留的余量；budget 是上限，卡住也不会把自检挂死。
+    """
+    started = time.monotonic()
+    deadline = started + budget
+    while True:
+        await asyncio.sleep(0.05)
+        tasks = [t for t in asyncio.all_tasks()
+                 if t is not asyncio.current_task()]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        now = time.monotonic()
+        if not tasks and now - started >= min_seconds:
+            return
+        if now >= deadline:
+            return
 
 
 # --------------------------------------------------------------------------- 指令解析
@@ -654,6 +685,68 @@ async def test_netease_reorder() -> None:
 
 
 # --------------------------------------------------------------------------- 语法/导入
+def test_config_robustness() -> None:
+    """config.json 是主播会手改的文件，读的时候必须容错。
+
+    真实踩过的坑：记事本默认存成「UTF-8 带 BOM」，文件开头多一个 \\ufeff，
+    json.loads 直接抛 "Unexpected UTF-8 BOM"，报错完全看不出是 BOM 的问题，
+    服务当场起不来。
+    """
+    print("\n== 配置读取容错 ==")
+    import shutil
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp(prefix="songboard-cfg-"))
+    try:
+        # 1) 带 BOM
+        bom = tmp / "bom.json"
+        bom.write_text('{"room_id": 123, "gift_gate": {"min_coin": 700}}',
+                       encoding="utf-8-sig")
+        cfg = Config.load(bom)
+        check("带 BOM 的 config.json 能读（记事本存的）",
+              cfg.get("room_id") == 123 and cfg.get("gift_gate.min_coin") == 700,
+              f"room={cfg.get('room_id')} coin={cfg.get('gift_gate.min_coin')}")
+
+        # 2) 缺字段时用默认值补齐
+        check("缺的字段用默认值补齐",
+              cfg.get("queue.max_size") == 30 and cfg.get("mode") == "demo",
+              f"{cfg.get('queue.max_size')}/{cfg.get('mode')}")
+
+        # 3) 存回来不带 BOM
+        cfg.save()
+        raw = bom.read_bytes()
+        check("save() 写出来不带 BOM", not raw.startswith(b"\xef\xbb\xbf"))
+        check("save() 之后再读回来值不变",
+              Config.load(bom).get("gift_gate.min_coin") == 700)
+
+        # 4) JSON 写坏了要给看得懂的报错，而不是 traceback
+        bad = tmp / "bad.json"
+        bad.write_text('{ "room_id": 1, }', encoding="utf-8")
+        msg = ""
+        try:
+            Config.load(bad)
+        except SystemExit as exc:
+            msg = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            msg = f"抛了 {type(exc).__name__}: {exc}"
+        check("JSON 写坏了给出人话报错（含行号列号）",
+              "不是合法 JSON" in msg and "第 1 行" in msg, msg[:120])
+
+        # 5) 最外层不是对象
+        arr = tmp / "arr.json"
+        arr.write_text('[1, 2, 3]', encoding="utf-8")
+        msg2 = ""
+        try:
+            Config.load(arr)
+        except SystemExit as exc:
+            msg2 = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            msg2 = f"抛了 {type(exc).__name__}: {exc}"
+        check("最外层是数组时报错清楚", "必须是一个" in msg2, msg2[:120])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_syntax() -> None:
     """所有源码都必须能编译、所有模块都必须能导入。
 
@@ -1408,13 +1501,7 @@ async def test_sync_playlist_regression() -> None:
           f"state={cur.state.value if cur else None}")
 
     await App._sync_playlist(app)
-    for _ in range(40):
-        await asyncio.sleep(0.05)
-        tasks = [t for t in asyncio.all_tasks()
-                 if t is not asyncio.current_task()]
-        if not tasks:
-            break
-        await asyncio.gather(*tasks, return_exceptions=True)
+    await _drain_tasks(min_seconds=1.0)
 
     check("正在播放那首被写进了歌单（坑 1）",
           bool(drv.added or drv.appended),
@@ -1547,13 +1634,7 @@ async def test_queue_only_mode() -> None:
         # 跑两轮（每轮模拟一次状态循环）
         for _ in range(2):
             await App._sync_queue_only(app)
-            for _ in range(40):
-                await asyncio.sleep(0.05)
-                tasks = [t for t in asyncio.all_tasks()
-                         if t is not asyncio.current_task()]
-                if not tasks:
-                    break
-                await asyncio.gather(*tasks, return_exceptions=True)
+            await _drain_tasks()
 
         print(f"  插入调用: {inserted}")
         print(f"  歌单写入违规: {spy.violations}")
@@ -1577,13 +1658,7 @@ async def test_queue_only_mode() -> None:
         player["next"] = None
         for _ in range(2):
             await App._sync_queue_only(app)
-            for _ in range(40):
-                await asyncio.sleep(0.05)
-                tasks = [t for t in asyncio.all_tasks()
-                         if t is not asyncio.current_task()]
-                if not tasks:
-                    break
-                await asyncio.gather(*tasks, return_exceptions=True)
+            await _drain_tasks()
         head_calls2 = [x for x in inserted if not isinstance(x, tuple)]
         print(f"  队头推进后总插队次数: {len(head_calls2)}")
         check("队头开始播之后才插下一首",
@@ -1594,25 +1669,13 @@ async def test_queue_only_mode() -> None:
 
         # 硬闸门：即使 auto_add / write_playlist 都开着，也只插队列模式说了算
         await App._sync_playlist(app)
-        for _ in range(40):
-            await asyncio.sleep(0.05)
-            tasks = [t for t in asyncio.all_tasks()
-                     if t is not asyncio.current_task()]
-            if not tasks:
-                break
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await _drain_tasks()
         check("即使 auto_add=true，_sync_playlist 也被队列模式拦住",
               not spy.violations, str(spy.violations))
 
         # 清理也绝不该动歌单
         await App._prune_playlist(app)
-        for _ in range(40):
-            await asyncio.sleep(0.05)
-            tasks = [t for t in asyncio.all_tasks()
-                     if t is not asyncio.current_task()]
-            if not tasks:
-                break
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await _drain_tasks()
         check("清理逻辑也被拦住，不删歌单里的歌",
               not spy.violations, str(spy.violations))
     finally:
@@ -1651,15 +1714,7 @@ async def test_queue_only_first_song() -> None:
         return [{"id": ids[kw], "name": kw, "artists": "测试"}]
 
     def drain():
-        async def inner():
-            for _ in range(40):
-                await asyncio.sleep(0.05)
-                tasks = [t for t in asyncio.all_tasks()
-                         if t is not asyncio.current_task()]
-                if not tasks:
-                    break
-                await asyncio.gather(*tasks, return_exceptions=True)
-        return inner()
+        return _drain_tasks()
 
     M.search_song = fake_search
     try:
@@ -1842,13 +1897,7 @@ async def test_queue_gate_not_stuck() -> None:
         return [{"id": ids[kw], "name": kw, "artists": "测试"}]
 
     async def drain():
-        for _ in range(40):
-            await asyncio.sleep(0.05)
-            tasks = [t for t in asyncio.all_tasks()
-                     if t is not asyncio.current_task()]
-            if not tasks:
-                break
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await _drain_tasks()
 
     M.search_song = fake_search
     try:
@@ -1919,6 +1968,245 @@ async def test_queue_gate_not_stuck() -> None:
         M.search_song = orig_search
 
 
+async def test_gift_gate() -> None:
+    """礼物门槛：只有送过礼物的观众才能点歌。
+
+    重点测"骗不过去"的边界 —— 门槛的价值全在这些地方：
+      * 免费礼物（银瓜子）不能算，否则送个辣条就拿到资格
+      * 金额不够不能放行
+      * 时效过期要重新送
+      * 连击礼物要按数量算，不能只算 1 个
+    """
+    print("\n== 礼物门槛 ==")
+    from songboard.giftgate import GiftLedger
+
+    def make_cfg(**over):
+        c = Config.load(Path(__file__).resolve().parent / "__selftest_config.json")
+        c["gift_gate.enabled"] = True
+        c["gift_gate.mode"] = "min_total"
+        c["gift_gate.min_coin"] = 1000
+        c["gift_gate.window_seconds"] = 0
+        c["gift_gate.require_paid"] = True
+        c["gift_gate.guard_always_ok"] = True
+        c["gift_gate.guard_min_level"] = 3
+        c["gift_gate.sc_always_ok"] = True
+        for k, v in over.items():
+            c[f"gift_gate.{k}"] = v
+        return c
+
+    def gift(uid, coin, paid=True, num=1, name="测试礼物"):
+        return {"type": "gift", "uid": uid, "user": f"u{uid}",
+                "gift": {"name": name, "num": num,
+                         "price": coin // max(num, 1),
+                         "total_coin": coin, "paid": paid, "guard_level": 0}}
+
+    # ---- 关闭时完全不拦 ----
+    g = GiftLedger(make_cfg(enabled=False))
+    check("门槛关闭时直接放行", g.check(1).ok is True)
+
+    # ---- 没送过 ----
+    g = GiftLedger(make_cfg())
+    d = g.check(1)
+    check("没送过礼物不能点", d.ok is False, d.reason)
+    check("提示里带出门槛金额", "1000" in d.hint, d.hint)
+
+    # ---- 免费礼物骗不过去（最关键的一条）----
+    g = GiftLedger(make_cfg())
+    g.record_gift(gift(1, 0, paid=False, name="辣条"))
+    d = g.check(1)
+    check("只送免费礼物不能点（送辣条骗不过去）", d.ok is False, d.reason)
+    check("免费礼物被计数但不计入金额",
+          g.seen_free_gifts == 1 and g.users[1].total_coin == 0,
+          f"free={g.seen_free_gifts} coin={g.users[1].total_coin}")
+
+    # ---- 金额不够 ----
+    g = GiftLedger(make_cfg())
+    g.record_gift(gift(1, 500, paid=True))
+    d = g.check(1)
+    check("金额不够不能点", d.ok is False, d.reason)
+    check("提示里算出还差多少", "还差 500" in d.hint, d.hint)
+
+    # ---- 刚好达标 ----
+    g = GiftLedger(make_cfg())
+    g.record_gift(gift(1, 1000, paid=True))
+    check("刚好达标就放行", g.check(1).ok is True, g.check(1).reason)
+
+    # ---- 累加 ----
+    g = GiftLedger(make_cfg())
+    g.record_gift(gift(1, 400, paid=True))
+    g.record_gift(gift(1, 600, paid=True))
+    check("多次送礼金额累加", g.check(1).ok is True,
+          f"total={g.users[1].total_coin}")
+
+    # ---- 连击数量要算对（不算对门槛就会算少）----
+    g = GiftLedger(make_cfg())
+    g.record_gift(gift(1, 1000, paid=True, num=10))   # 单价100 × 10
+    check("连击按总价算，不是只算 1 个", g.check(1).ok is True,
+          f"total={g.users[1].total_coin}")
+
+    # ---- 时效 ----
+    g = GiftLedger(make_cfg(window_seconds=300))
+    g.record_gift(gift(1, 1000, paid=True))
+    check("时效内可以点", g.check(1).ok is True)
+    g.users[1].last_at -= 600        # 往前拨 10 分钟
+    check("超过时效不能点（防刷一次点一天）", g.check(1).ok is False,
+          g.check(1).reason)
+
+    # ---- 舰长放行 ----
+    g = GiftLedger(make_cfg())
+    g.record_guard({"uid": 2, "user": "舰长",
+                    "guard": {"level": 3, "num": 1, "total_coin": 138000}})
+    check("舰长直接放行（不看金额）", g.check(2).ok is True)
+    # 金额小的舰长才能验出「直接放行」到底有没有生效：
+    # 138000 瓜子本来就超过 1000 的门槛，按金额算也会过，等于没测到。
+    g1b = GiftLedger(make_cfg())
+    g1b.record_guard({"uid": 2, "user": "小舰长",
+                      "guard": {"level": 3, "num": 1, "total_coin": 500}})
+    check("舰长直接放行：金额不够也放行", g1b.check(2).ok is True,
+          g1b.check(2).reason)
+    g2 = GiftLedger(make_cfg(guard_always_ok=False))
+    g2.record_guard({"uid": 2, "user": "小舰长",
+                     "guard": {"level": 3, "num": 1, "total_coin": 500}})
+    check("关掉『舰长直接放行』后要按金额算",
+          g2.check(2).ok is False, g2.check(2).reason)
+
+    # ---- any_paid ----
+    g = GiftLedger(make_cfg(mode="any_paid", min_coin=999999))
+    g.record_gift(gift(1, 1, paid=True))
+    check("any_paid 模式：送 1 瓜子付费礼物也放行", g.check(1).ok is True)
+
+    # ---- per_send ----
+    g = GiftLedger(make_cfg(mode="per_send", min_coin=1000))
+    g.record_gift(gift(1, 2500, paid=True))
+    check("per_send：额度够就放行", g.check(1).ok is True)
+    g.spend(1, 1000)
+    check("per_send：消耗一次后仍有余额", g.check(1).ok is True,
+          f"剩 {g.users[1].total_coin - g.users[1].spent_coin}")
+    g.spend(1, 1000)
+    d = g.check(1)
+    check("per_send：额度耗尽后不能点", d.ok is False, d.reason)
+    check("per_send：提示里给出剩余额度", "剩 500" in d.hint, d.hint)
+
+    # ---- guard_only ----
+    g = GiftLedger(make_cfg(mode="guard_only"))
+    g.record_gift(gift(1, 99999, paid=True))
+    check("guard_only：送再多钱但没上舰也不能点", g.check(1).ok is False,
+          g.check(1).reason)
+    g.record_guard({"uid": 1, "user": "u1", "guard": {"level": 3, "num": 1}})
+    check("guard_only：上舰后放行", g.check(1).ok is True)
+
+    # ---- 醒目留言 ----
+    g = GiftLedger(make_cfg())
+    check("SC 默认直接放行", g.check(3, is_super_chat=True).ok is True)
+    g2 = GiftLedger(make_cfg(sc_always_ok=False, sc_min_coin=30000))
+    check("SC 单独设门槛：不够就拦",
+          g2.check(3, is_super_chat=True).ok is False)
+    g2.record_super_chat({"uid": 3, "user": "u3", "price": 30000})
+    check("SC 金额达标后放行", g2.check(3, is_super_chat=True).ok is True)
+
+    # ---- 脏数据不能崩（B站字段类型不稳定）----
+    g = GiftLedger(make_cfg())
+    bad_inputs = ({"uid": 0}, {"uid": None}, {"uid": "abc"},
+                  {"uid": 5, "gift": None},
+                  {"uid": 5, "gift": {"total_coin": "x", "paid": "yes"}})
+    broke = None
+    for bad in bad_inputs:
+        try:
+            g.record_gift(bad)
+        except Exception as exc:  # noqa: BLE001
+            broke = (bad, repr(exc))
+            break
+    check("脏礼物数据不崩（uid=0/None/字符串、字段缺失）", broke is None,
+          str(broke))
+    check("uid 无效的礼物被丢弃，不会记到 uid=0 头上", 0 not in g.users)
+
+    # ---- 统计字段 ----
+    st = g.status()
+    need = ("enabled", "mode", "min_coin", "known_users", "paid_gifts",
+            "free_gifts", "allowed", "blocked", "top", "recent_blocks")
+    check("status() 给出控制台需要的字段",
+          all(k in st for k in need), str([k for k in need if k not in st]))
+
+    # ---- 只读判定（控制台刷新不该弄脏统计）----
+    g = GiftLedger(make_cfg())
+    g.record_gift(gift(1, 1000, paid=True))
+    before = (g.allows, g.blocks, len(g.recent_blocks))
+    qualified = [g.qualified(1), g.qualified(2), g.qualified(999)]
+    after = (g.allows, g.blocks, len(g.recent_blocks))
+    check("qualified() 判得准（够格的算够，没送过的算不够）",
+          qualified == [True, False, False], str(qualified))
+    check("qualified() 是只读的，不会把统计和拦截记录弄脏",
+          before == after, f"{before} -> {after}")
+    d = g.check(2)
+    check("check() 仍然照常计数（只读模式没把正常路径改坏）",
+          g.blocks == before[1] + 1 and d.ok is False,
+          f"blocks={g.blocks} ok={d.ok}")
+
+
+async def test_gift_cli_and_reload() -> None:
+    """命令行门槛设置 + 改配置时不能把观众的送礼记录冲掉。
+
+    async 是因为 App.__init__ 要一个在跑的事件循环；_gift_cli 本身是同步的。
+    """
+    print("\n== 礼物门槛：命令行与热更新 ==")
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+    from songboard.main import App
+
+    # ⚠️ 必须用临时配置文件：_gift_cli 会 cfg.save()，
+    #    拿真实 config.json 跑测试会把它覆盖掉（里面有真的 MUSIC_U）。
+    tmp_dir = Path(tempfile.mkdtemp(prefix="songboard-giftgate-"))
+    try:
+        cfg = Config.load(tmp_dir / "config.json")
+        cfg["mode"] = "demo"
+        app = App(cfg, persist=False)
+
+        def run(arg: str) -> str:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                app._gift_cli(arg)
+            return buf.getvalue()
+
+        run("on")
+        check("gift on 打开门槛", app.cfg.get("gift_gate.enabled") is True)
+        check("gift on 之后账本立刻按新配置工作", app.gifts.enabled is True)
+
+        run("min 2500")
+        check("gift min 2500 改金额并切到 min_total",
+              app.cfg.get("gift_gate.min_coin") == 2500
+              and app.cfg.get("gift_gate.mode") == "min_total",
+              f"{app.cfg.get('gift_gate.min_coin')}/{app.cfg.get('gift_gate.mode')}")
+
+        out = run("mode 乱写的模式")
+        check("gift mode 给非法值不写进配置、并提示用法",
+              app.cfg.get("gift_gate.mode") == "min_total" and "用法" in out,
+              out.strip())
+
+        # 关键：改配置不能把已经记下的送礼记录清掉
+        app.gifts.record_gift({"uid": 7, "user": "老观众",
+                               "gift": {"name": "小花花", "num": 1,
+                                        "total_coin": 3000, "paid": True}})
+        before = app.gifts.users[7].total_coin
+        run("min 1000")
+        check("改门槛不会清掉观众的累计金额（以前 reload 会全清）",
+              7 in app.gifts.users and app.gifts.users[7].total_coin == before,
+              f"{before} -> {[u.total_coin for u in app.gifts.users.values()]}")
+
+        out = run("list")
+        check("gift list 能列出送礼的人",
+              "老观众" in out and "3000" in out, out.strip())
+        check("gift list 标出谁有资格", "✓" in out, out.strip())
+        check("gift list 不该弄脏统计（走的是只读判定）",
+              app.gifts.blocks == 0, f"blocks={app.gifts.blocks}")
+
+        run("reset")
+        check("gift reset 清空记录", not app.gifts.users)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--live", type=int, help="真连测试用的直播间号")
@@ -1928,6 +2216,7 @@ def main() -> int:
 
     print("哔哩哔哩点歌板 · 自检")
     test_syntax()
+    test_config_robustness()
     test_commands()
     asyncio.run(test_queue())
     test_protocol()
@@ -1947,6 +2236,8 @@ def main() -> int:
     asyncio.run(test_queue_only_first_song())
     asyncio.run(test_queue_gate_not_stuck())
     asyncio.run(test_console_cannot_write_playlist())
+    asyncio.run(test_gift_gate())
+    asyncio.run(test_gift_cli_and_reload())
     test_ncm_bridge()
     if args.probe:
         test_probe(args.probe)

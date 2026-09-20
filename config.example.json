@@ -94,5 +94,16 @@
     "authority": "netease",
     "fallback_to_board": true,
     "strict_match": true
+  },
+  "gift_gate": {
+    "enabled": false,
+    "mode": "min_total",
+    "min_coin": 1000,
+    "window_seconds": 0,
+    "require_paid": true,
+    "guard_always_ok": true,
+    "guard_min_level": 3,
+    "sc_always_ok": true,
+    "sc_min_coin": 0
   }
 }

@@ -114,6 +114,23 @@ def _ws_headers(cookie: str, origin: str) -> dict[str, str]:
     return headers
 
 
+def _as_int(value: Any) -> int:
+    """把 B 站消息里的数值字段安全转成 int。
+
+    为什么需要：同一个字段在不同消息里可能是 int / str / float / None，
+    直接 int() 会抛异常，而异常发生在解包循环里会**掐断整个消息处理**。
+    礼物金额算错会直接影响"送礼才能点歌"的门槛，所以这里必须稳。
+    """
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return 0
+
+
 # --------------------------------------------------------------------------- 包体
 def encode_packet(body: bytes | dict, op: int = OP_MESSAGE, proto: int = 1) -> bytes:
     """包头 16 字节：总长(4) 头长(2) 协议版本(2) 操作码(4) 序号(4)。
@@ -409,22 +426,75 @@ class BilibiliDanmaku:
 
         if cmd.startswith("SEND_GIFT"):
             data = msg.get("data") or {}
+            # ⚠️ 礼物的金额必须算对，否则"送礼才能点歌"的门槛形同虚设：
+            #   * price      单个礼物的价格（金瓜子）
+            #   * num        数量
+            #   * total_coin 有时才有（连击/聚合消息里）
+            #   * paid       免费礼物（银瓜子送的）是 False，必须过滤掉，
+            #                否则观众送个免费辣条就拿到点歌资格
+            price = _as_int(data.get("price"))
+            num = _as_int(data.get("num")) or 1
+            total = _as_int(data.get("total_coin"))
+            if total <= 0:
+                total = price * num
             await self.on_danmaku({
                 "type": "gift", "text": "", "user": str(data.get("uname") or "未知"),
-                "uid": int(data.get("uid") or 0),
-                "gift": {"name": data.get("giftName"), "num": data.get("num")},
+                "uid": _as_int(data.get("uid")),
+                "gift": {
+                    "name": str(data.get("giftName") or ""),
+                    "num": num,
+                    "price": price,
+                    "total_coin": total,
+                    "paid": bool(data.get("paid")),
+                    "guard_level": _as_int(data.get("guard_level")),
+                    "combo": bool(data.get("combo_gift") or data.get("batch_combo_id")),
+                },
                 "raw": msg,
             })
             return
 
         if cmd.startswith("GUARD_BUY"):
             data = msg.get("data") or {}
+            # 舰长价格随等级不同，用 price*num；拿不到就按 num 记
+            price = _as_int(data.get("price"))
+            num = _as_int(data.get("num")) or 1
             await self.on_danmaku({
-                "type": "guard", "text": "", "user": str(data.get("username") or "未知"),
-                "uid": int(data.get("uid") or 0),
-                "guard": {"level": data.get("guard_level"), "num": data.get("num")},
+                "type": "guard", "text": "",
+                "user": str(data.get("username") or "未知"),
+                "uid": _as_int(data.get("uid")),
+                "guard": {
+                    "level": _as_int(data.get("guard_level")),
+                    "num": num,
+                    "total_coin": price * num if price > 0 else 0,
+                    "name": str(data.get("gift_name") or ""),
+                },
                 "raw": msg,
             })
+            return
+
+        # ⚠️ 连击礼物走的是另一个 cmd（COMBO_SEND）。
+        # 不处理的话"连送 10 个"只会按 1 个记账，门槛会算少。
+        # 它的字段名和 SEND_GIFT 不完全一样（uid/uname 可能为 0/空）。
+        if cmd.startswith("COMBO_SEND"):
+            data = msg.get("data") or {}
+            price = _as_int(data.get("price"))
+            num = _as_int(data.get("combo_num")) or _as_int(data.get("gift_num")) or 1
+            await self.on_danmaku({
+                "type": "gift", "text": "",
+                "user": str(data.get("uname") or "未知"),
+                "uid": _as_int(data.get("uid")),
+                "gift": {
+                    "name": str(data.get("gift_name") or ""),
+                    "num": num,
+                    "price": price,
+                    "total_coin": price * num,
+                    "paid": bool(data.get("paid", True)),
+                    "guard_level": _as_int(data.get("guard_level")),
+                    "combo": True,
+                },
+                "raw": msg,
+            })
+            return
 
     async def _sleep_or_stop(self, seconds: float) -> None:
         try:

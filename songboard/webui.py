@@ -219,8 +219,13 @@ class BoardHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/mark_done":
                 return self._send_json(self._run_async(self.ctx["mark_done"]()))
             if parsed.path == "/api/simulate":
+                # kind 允许模拟弹幕以外的付费事件（gift / guard / super_chat），
+                # 这样调"送礼物才能点歌"的门槛时不用真的去送礼
                 res = self._run_async(self.ctx["simulate_danmaku"](
                     str(body.get("text", "")), str(body.get("user", "测试观众")),
+                    kind=str(body.get("kind", "danmaku")),
+                    coin=int(body.get("coin", 0) or 0),
+                    paid=bool(body.get("paid", True)),
                 ))
                 return self._send_json(res)
             if parsed.path == "/api/mode":
@@ -249,6 +254,48 @@ class BoardHandler(BaseHTTPRequestHandler):
                     self.ctx["log_change"](
                         "网易云搜索/查时长：" + ("已开启" if enabled else "已关闭"))
                 return self._send_json({"ok": True, "enabled": enabled})
+            if parsed.path == "/api/gift_gate":
+                # 礼物门槛：规则由主播在控制台里配。
+                # 只接受白名单字段，且做强类型转换 —— 前端传来的都是字符串，
+                # 直接写进配置会让 GiftLedger 里 int()/bool() 出错。
+                cfg = self.ctx["config"]
+                gg = cfg["gift_gate"]
+                if "enabled" in body:
+                    gg["enabled"] = bool(body["enabled"])
+                if "mode" in body:
+                    mode = str(body["mode"])
+                    if mode not in ("min_total", "any_paid", "per_send",
+                                    "guard_only"):
+                        return self._send_json(
+                            {"ok": False, "error": f"未知模式: {mode}"}, 400)
+                    gg["mode"] = mode
+                for key in ("min_coin", "window_seconds", "sc_min_coin",
+                            "guard_min_level"):
+                    if key in body:
+                        try:
+                            gg[key] = max(0, int(float(body[key] or 0)))
+                        except (TypeError, ValueError):
+                            return self._send_json(
+                                {"ok": False, "error": f"{key} 不是数字"}, 400)
+                for key in ("require_paid", "guard_always_ok", "sc_always_ok"):
+                    if key in body:
+                        gg[key] = bool(body[key])
+                cfg.save()
+                self.ctx["log_change"](
+                    "礼物门槛：" + ("已开启" if gg.get("enabled") else "已关闭")
+                    + f"（模式={gg.get('mode')}，门槛={gg.get('min_coin')} 瓜子）"
+                )
+                # 让 App 里的账本立刻按新配置工作
+                reload_gate = self.ctx.get("reload_gift_gate")
+                if reload_gate:
+                    reload_gate()
+                return self._send_json({"ok": True, "gift_gate": dict(gg)})
+            if parsed.path == "/api/gift_gate/reset":
+                reset = self.ctx.get("reset_gift_gate")
+                if reset:
+                    reset()
+                self.ctx["log_change"]("礼物门槛：贡献记录已清空")
+                return self._send_json({"ok": True})
         except Exception as exc:
             return self._send_json({"ok": False, "error": repr(exc)}, 500)
         return self.send_error(404, "not found")
