@@ -8,6 +8,16 @@
 > ⚠️ 本项目依赖 B 站弹幕长连接和网易云的**非官方接口**，
 > 接口一改就可能失效。补丁版本里也可能会出现"适应上游变更"的修复。
 
+## [0.2.3] - 2026-09-20
+
+### 修复
+
+- `proc_check.py` 的输出会被服务子进程污染：子进程的 `input()` 提示符
+  （`点歌板> `）和 HELP 文本会**直接写到运行检查的那个终端**，
+  把检查结果冲得看不见 —— 即使它的 stdout 已经接到管道了也没用
+  （Windows 上 `input` 的提示符不走那个句柄；重定向到文件时看着正常，
+  在终端里跑才露馅）。现在用 `CREATE_NO_WINDOW` 让子进程脱离当前控制台。
+
 ## [0.2.2] - 2026-09-20
 
 ### 修复
@@ -122,6 +132,7 @@
 - 网易云的接口是非官方的，可能随官方改动失效。
 - 桥需要每次重新注入（网易云一重启就失效）。
 
+[0.2.3]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.1.0...v0.2.0

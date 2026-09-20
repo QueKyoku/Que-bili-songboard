@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -68,6 +69,11 @@ def main() -> int:
          "--port", str(PORT), "--no-persist", "--config", str(tmp_cfg)],
         cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+        # ⚠️ 不加这个的话，服务子进程的 input() 提示符（"点歌板> "）和 HELP
+        #    会**直接写到我们所在的这个终端**，把检查结果冲得看不见 ——
+        #    stdout 明明已经接到管道了也没用（Windows 上 input 的提示符
+        #    不走那个句柄）。重定向到文件时看着正常，在终端里跑才会露馅。
+        creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
     )
     results: list[tuple[str, bool, str]] = []
     try:
