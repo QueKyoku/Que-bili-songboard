@@ -1099,15 +1099,19 @@ async def test_no_cookie_no_insert() -> None:
 
 
 def test_cookie_extract() -> None:
-    """set_cookie.py 从剪贴板抠 cookie：用户粘什么形态都要能认出来。
+    """从剪贴板/响应头抠 cookie：什么形态都要能认出来。
 
     实测见过的形态：纯 cookie、带 `Cookie:` 前缀、F12「Copy request headers」
     的整块、`Copy as cURL` 的整条命令、JSON 里嵌的 cookie。
     以前是按 `;` 拆分配对，cURL 那种会解析成 `-H 'cookie: MUSIC_U`
     这样的字段名，直接失败。
+
+    提取逻辑现在住在 songboard/cookies.py —— set_cookie.py（手动复制）
+    和 login_qrcode.py（扫码登录）共用同一套。
     """
-    print("\n== cookie 提取（set_cookie.py） ==")
-    from set_cookie import extract_fields
+    print("\n== cookie 提取（songboard/cookies.py） ==")
+    from songboard.cookies import build_cookie, cookies_from_response_headers, \
+        extract_fields
 
     MU, CS = "AbCd" * 8, "csrf123"
     good = [
@@ -1142,6 +1146,31 @@ def test_cookie_extract() -> None:
                         ("空字符串", "")):
         got = extract_fields(text)
         check(f"不会误认：{label}", "MUSIC_U" not in got, str(got))
+
+    check("build_cookie 拼成 MUSIC_U=...; __csrf=... 的形式",
+          build_cookie(f"__csrf={CS}; MUSIC_U={MU}") == f"MUSIC_U={MU}; __csrf={CS}",
+          build_cookie(f"__csrf={CS}; MUSIC_U={MU}"))
+    check("没有 MUSIC_U 时 build_cookie 返回空串",
+          build_cookie("sessionid=abc") == "")
+
+    # 扫码登录成功时凭据在 Set-Cookie 里，不在 body —— 这条专门测那个解析
+    class FakeHeaders:
+        def __init__(self, items): self._items = items
+        def get_all(self, name): return self._items if name == "Set-Cookie" else None
+
+    hd = FakeHeaders([
+        "MUSIC_U=xyz789; Path=/; Domain=.music.163.com; HttpOnly",
+        "__csrf=abc123; Path=/; Domain=.music.163.com",
+        "NMTID=nnn; Path=/; Max-Age=31536000",
+    ])
+    got = cookies_from_response_headers(hd)
+    check("能从 Set-Cookie 里收出凭据（扫码登录用）",
+          "MUSIC_U=xyz789" in got and "__csrf=abc123" in got
+          and "Path=" not in got and "HttpOnly" not in got, got)
+    check("没有 Set-Cookie 时返回空串",
+          cookies_from_response_headers(FakeHeaders([])) == "")
+    check("响应头对象是 None 也不崩",
+          cookies_from_response_headers(None) == "")
 
 
 def test_syntax() -> None:

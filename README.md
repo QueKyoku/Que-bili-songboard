@@ -8,7 +8,7 @@
 git clone https://github.com/QueKyoku/Que-bili-songboard.git
 ```
 
-当前版本 **v0.2.8** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
+当前版本 **v0.3.0** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
 `python -m songboard --version` 可以直接问程序自己
 
 给 B 站主播用的点歌工具。观众发一条 `点歌 稻香`，程序就会把这首歌加到网易云的
@@ -628,7 +628,53 @@ python demo_gift.py --reset                     # 清空所有累计
 网易云的 cookie 是**唯一**需要手动准备的凭据（为什么不能省，见上一节）。
 这一章讲怎么最快拿到它，不用翻文档、不用手拼字符串。
 
-### 9.1 最快的办法：复制请求头 + 一条命令
+### 9.1 最省事：扫码登录
+
+手机上有网易云音乐 App 的话，这条最省事 —— **完全不用碰浏览器**：
+
+```bash
+pip install qrcode          # 只装这一次；纯 Python 小库，几十 KB
+python login_qrcode.py
+```
+
+终端里会直接画出一个二维码：
+
+```
+==============================================================
+  用手机上的【网易云音乐】App 扫下面这个码
+==============================================================
+
+█▀▀▀▀▀▀▀██▀███▀█████▀██▀▀▀█▀▀▀▀▀▀▀█
+█ █▀▀▀█ █▄ ▀ ▄█ ▄█▄▀▀▀▀ ▀▄█ █▀▀▀█ █
+█ █   █ █▄▄▀▄▀▄▀▄▀  ▀▀▀▄ ▄█ █   █ █
+…（省略中间几行）
+
+扫完在手机上点「确认登录」。二维码 3 分钟内有效。
+
+  等待扫码…
+  已扫码 —— 请在手机上点「确认登录」
+  登录成功
+
+✅ 从 Set-Cookie 收到：['MUSIC_U', '__csrf', 'NMTID']
+✅ 已写入 config.json（866 字符），并自动开启「搜索歌曲 / 查时长」
+✅ cookie 有效，已登录：你的昵称
+```
+
+用手机上的**网易云音乐 App**（不是微信扫一扫）扫它，然后在手机上确认。
+**不用打开浏览器、不用 F12、不用复制粘贴**，脚本会把 cookie 写进配置并当场验证。
+
+> **为什么不做"自动读浏览器里的 cookie"？** 试过了，现在**做不到**：
+> Chrome / Edge 127 之后给 cookie 换了 **App-Bound Encryption**，值以 `v20`
+> 开头，密钥绑死浏览器自身身份，第三方程序解不开。
+> 我实测过：DPAPI 密钥能拿到、cookie 数据库也能读（浏览器没在跑的时候），
+> 但**每一条 cookie 都是 v20，一条都解不出来**。
+> 硬要解就得往浏览器进程里注入代码 —— 那种事我们不做。
+> 所以**扫码是唯一真正的"全自动"**；不想装 `qrcode` 就走下面那条手动路。
+
+不想装 `qrcode` 的话，`login_qrcode.py` 会明确告诉你装什么，
+或者直接用下面这个方式，一条命令也能搞定。
+
+### 9.2 手动复制：F12 → 复制请求头 → 一条命令
 
 **第 1 步**　浏览器打开 <https://music.163.com>，确认**已登录**（右上角有你的头像）。
 
@@ -665,11 +711,12 @@ python set_cookie.py
 > （bash 的或 cmd 的都行），它都能认出来。
 > 靠的是**按字段名搜值**，而不是按分隔符拆 —— 后者在真实粘贴内容上根本不可靠。
 
-### 9.2 三种拿法，按省事程度排
+### 9.3 四种拿法，按省事程度排
 
 | 方法 | 操作 | 说明 |
 | --- | --- | --- |
-| **复制请求头**（推荐） | F12 → Network → 右键请求 → Copy → Copy request headers | 一次拿到完整的，配合 `set_cookie.py` 全自动 |
+| **扫码登录**（最省事） | `python login_qrcode.py`，手机扫一下 | 完全不碰浏览器；要先 `pip install qrcode` |
+| **复制请求头** | F12 → Network → 右键请求 → Copy → Copy request headers | 一次拿到完整的，配合 `set_cookie.py` 全自动 |
 | **Copy as cURL** | F12 → Network → 右键请求 → Copy → Copy as cURL | 一样省事，脚本也认 |
 | **Application 面板** | F12 → Application → Cookies → `https://music.163.com` → 复制 `MUSIC_U` 和 `__csrf` | 最直观，但要分两次复制、手动拼成 `MUSIC_U=xxx; __csrf=yyy` |
 
@@ -684,7 +731,7 @@ python set_cookie.py --cookie "MUSIC_U=xxx; __csrf=yyy"
 > 你只会看到一堆无关的第三方 cookie（`_ga`、`Hm_lvt_*` 之类），白折腾一场。
 > 要是你偏要试：结果里没有 `MUSIC_U` 就说明它是 HttpOnly，回去用上面的方法。
 
-### 9.3 怎么确认 cookie 还有效
+### 9.4 怎么确认 cookie 还有效
 
 三个地方都能看，任选：
 
@@ -692,7 +739,7 @@ python set_cookie.py --cookie "MUSIC_U=xxx; __csrf=yyy"
 2. **控制台那张「网易云（播放队列）」卡片** —— 显示 `已登录：你的昵称` 就是好的
 3. **服务日志** —— 启动时会写一行「网易云搜索：搜索可用，已登录：xxx」
 
-### 9.4 cookie 过期了会怎样
+### 9.5 cookie 过期了会怎样
 
 `MUSIC_U` 有有效期（通常几个月）。过期后的表现：
 
@@ -970,6 +1017,7 @@ songboard/                 主程序（Python）
   ncmbridge.py             ★ 播放队列桥客户端（命名管道）
   webui.py                 HTTP + WebSocket 服务
   config.py                配置读写
+  cookies.py               cookie 提取（手动复制和扫码登录共用）
 
 web/
   overlay.html             叠加层（给直播画面）
@@ -1002,7 +1050,8 @@ e2e_check.py               端到端检查（⚠️ 有副作用）
 check_integration.py       集成检查
 demo_*.py                  手动演练脚本（demo_gift.py = 模拟送礼试门槛）
 diag_room.py               弹幕直连诊断
-set_cookie.py              一键设置网易云 cookie（读剪贴板 + 自动验证）
+login_qrcode.py            扫码登录网易云，自动拿 cookie（最省事）
+set_cookie.py              手动复制 cookie 时用（读剪贴板 + 自动验证）
 启动.bat / 启动外部媒体源.bat
 ```
 

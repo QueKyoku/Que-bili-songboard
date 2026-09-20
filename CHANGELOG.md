@@ -8,6 +8,33 @@
 > ⚠️ 本项目依赖 B 站弹幕长连接和网易云的**非官方接口**，
 > 接口一改就可能失效。补丁版本里也可能会出现"适应上游变更"的修复。
 
+## [0.3.0] - 2026-09-20
+
+### 新增
+
+- **扫码登录：`python login_qrcode.py`**。终端里直接画出二维码，用手机上的
+  网易云音乐 App 扫一下、点确认，cookie 就自动写进配置并当场验证
+  （打印出登录的昵称）。**不碰浏览器、不用 F12、不用复制粘贴。**
+  需要 `qrcode` 这个纯 Python 小库（可选依赖，只有扫码时才用得到）。
+- README 第九章补了对应小节，并把几种拿法按省事程度重新排了序。
+- `songboard/cookies.py`：cookie 提取逻辑抽成共用模块，
+  手动复制（`set_cookie.py`）和扫码登录走同一套；
+  新增「从 `Set-Cookie` 响应头收凭据」—— 扫码成功时凭据在响应头里，不在 body。
+
+### 说明
+
+- **"自动读浏览器里的 cookie"这条路，现在走不通**（实测结论，写下来免得再试）：
+  Chrome / Edge 127 之后给 cookie 换了 App-Bound Encryption，值以 `v20` 开头，
+  密钥绑死浏览器自身身份。实测能拿到 DPAPI 密钥、能读 cookie 数据库
+  （浏览器没在跑的时候），但**每一条 cookie 都是 v20，一条都解不出来**。
+  硬要解就得往浏览器进程里注入代码 —— 本项目不做那种事。
+  所以扫码是唯一真正的"全自动"。
+- 编写时实测确认：unikey 接口可用、轮询返回 801（等待扫码）正常、
+  终端二维码渲染正常、进度输出实时可见。
+  ⚠️ **803（扫码成功那一步）需要真人拿手机扫，作者没法自测** ——
+  代码里为此加了兜底：万一响应头里没有 `MUSIC_U`，会把收到的
+  `Set-Cookie` 条目全部打印出来，便于定位。
+
 ## [0.2.8] - 2026-09-20
 
 ### 新增
@@ -234,6 +261,7 @@
 - 网易云的接口是非官方的，可能随官方改动失效。
 - 桥需要每次重新注入（网易云一重启就失效）。
 
+[0.3.0]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.5...v0.2.6

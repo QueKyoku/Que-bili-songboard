@@ -124,7 +124,13 @@ def weapi_params(payload: dict[str, Any]) -> dict[str, str]:
     return {"params": params, "encSecKey": _rsa_encrypt(secret)}
 
 
-def weapi_post(path: str, payload: dict[str, Any], cookie: str) -> dict:
+def weapi_post_raw(path: str, payload: dict[str, Any],
+                   cookie: str) -> tuple[dict, Any]:
+    """和 weapi_post 一样，但**连响应头一起返回**。
+
+    扫码登录成功时网易云是通过 `Set-Cookie` 下发 MUSIC_U 的，body 里没有 ——
+    所以那一步必须能读到响应头。
+    """
     url = f"https://music.163.com/weapi{path}"
     data = urllib.parse.urlencode(weapi_params(payload)).encode()
     headers = {
@@ -137,10 +143,15 @@ def weapi_post(path: str, payload: dict[str, Any], cookie: str) -> dict:
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=15) as resp:
         body = resp.read().decode("utf-8", "replace")
+        resp_headers = resp.headers
     try:
-        return json.loads(body)
+        return json.loads(body), resp_headers
     except json.JSONDecodeError:
-        return {"code": -1, "raw": body[:200]}
+        return {"code": -1, "raw": body[:200]}, resp_headers
+
+
+def weapi_post(path: str, payload: dict[str, Any], cookie: str = "") -> dict:
+    return weapi_post_raw(path, payload, cookie)[0]
 
 
 def search_song(keyword: str, cookie: str = "", limit: int = 5) -> list[dict]:

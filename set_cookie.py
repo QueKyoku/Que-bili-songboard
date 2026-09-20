@@ -22,37 +22,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from songboard.config import Config  # noqa: E402
+from songboard.cookies import KEEP, extract_fields  # noqa: E402
 from songboard.netease import NeteaseAuthError, account_info, search_song  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 
-# 只保留需要的字段，避免把无关的第三方 cookie 一起存进去
-KEEP = ("MUSIC_U", "__csrf", "NMTID", "__remember_me", "MUSIC_A", "_ntes_nuid")
-
-
-def extract_fields(raw: str) -> dict[str, str]:
-    """从"一坨文本"里抓出需要的 cookie 字段。
-
-    ⚠️ 不能按 `;` 拆分再配对 —— 用户粘进来的东西形态太多了，实测见过的有：
-
-        MUSIC_U=xxx; __csrf=yyy                    （纯 cookie）
-        Cookie: MUSIC_U=xxx; __csrf=yyy            （带前缀的一行）
-        Host: music.163.com\\nCookie: MUSIC_U=xxx   （整块请求头，含换行）
-        curl '...' -H 'cookie: MUSIC_U=xxx; ...'   （Copy as cURL 的整条命令）
-
-    按分隔符拆的话，第一种之后的全都解析不出来（比如 cURL 里第一个字段名会
-    变成 `-H 'cookie: MUSIC_U`）。所以改成**直接按字段名正则搜值**：
-    值一直取到分号、空白或引号为止。
-    """
-    found: dict[str, str] = {}
-    for key in KEEP:
-        m = re.search(rf"""(?:^|[;:,\s'"]){re.escape(key)}=([^;'"\s]+)""", raw)
-        if m and m.group(1):
-            found[key] = m.group(1).strip()
-    return found
-
 
 def build_cookie(raw: str) -> str:
+    """挑出需要的字段并整理成 `MUSIC_U=...; __csrf=...`；没找到就返回空。
+
+    提取逻辑在 songboard/cookies.py（扫码登录那边也在用同一套）。
+    """
     text = raw.strip()
     if not text:
         return ""
@@ -64,7 +44,8 @@ def build_cookie(raw: str) -> str:
         print("   常见原因：")
         print("     · 复制成了别的东西（比如整页 HTML、或者只是 MUSIC_U 的值）")
         print("     · 复制的地方不是 music.163.com（换了个标签页？）")
-        print("   正确的拿法见 README「快捷获取 Cookie」一节。")
+        print("   正确的拿法见 README 第九章「快捷获取 Cookie」，")
+        print("   或者干脆用扫码登录：python login_qrcode.py")
         return ""
     order = [k for k in KEEP if k in found]
     print(f"✅ 提取到 {len(found)} 个字段：{order}")
