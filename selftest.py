@@ -914,6 +914,78 @@ def test_bat_files() -> None:
                 check(f"启动.bat 里有「{key}」", key in text)
 
 
+def test_netease_auth_codes() -> None:
+    """cookie 失效必须报"登录态无效"，不能报成"搜不到这首歌"。
+
+    实测（2026-09）：空 cookie / 假 cookie 调 weapi 搜索，网易云返回
+    `code=50000005`。以前这个码被忽略，搜到 0 条就往上报
+    "网易云搜不到《稻香》" —— 主播会去查歌名对不对，方向完全错了。
+    """
+    print("\n== 网易云登录态报错 ==")
+    from songboard import netease as NE
+
+    check("有专门的 NeteaseAuthError 类型", issubclass(NE.NeteaseAuthError,
+                                                     RuntimeError))
+    check("50000005 被算作登录态错误",
+          50000005 in NE.AUTH_ERROR_CODES, str(NE.AUTH_ERROR_CODES))
+
+    # 用假 cookie 打真接口（只读，不会改任何东西）会拿到 50000005 ——
+    # 但自检必须离线可跑，所以这里只验"拿到这个码会抛异常"这条逻辑。
+    orig = NE.weapi_post
+    try:
+        NE.weapi_post = lambda *a, **kw: {"code": 50000005}      # type: ignore
+        raised = ""
+        try:
+            NE.search_song("稻香", cookie="MUSIC_U=fake", limit=1)
+        except NE.NeteaseAuthError as exc:
+            raised = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            raised = f"抛了 {type(exc).__name__}: {exc}"
+        check("搜索遇到登录态错误码会抛 NeteaseAuthError",
+              "登录态无效" in raised and "50000005" in raised, raised[:90])
+
+        # 正常的 200 不能被误伤
+        NE.weapi_post = lambda *a, **kw: {                        # type: ignore
+            "code": 200,
+            "result": {"songs": [{"id": 123, "name": "稻香",
+                                  "ar": [{"name": "周杰伦"}],
+                                  "al": {"name": "魔杰座"}, "dt": 223000}]}}
+        ok = NE.search_song("稻香", cookie="x", limit=1)
+        check("正常返回（code=200）不受影响",
+              len(ok) == 1 and ok[0]["id"] == 123
+              and ok[0]["artists"] == "周杰伦" and ok[0]["duration_ms"] == 223000,
+              str(ok))
+
+        # 真的搜不到（code=200 但没歌）不该抛异常
+        NE.weapi_post = lambda *a, **kw: {"code": 200, "result": {}}  # type: ignore
+        check("真的搜不到时不抛异常，只返回空列表",
+              NE.search_song("不存在的歌", cookie="x") == [])
+
+        # account_info：cookie 无效时网易云照样返回 200，但没 profile
+        NE.weapi_post = lambda *a, **kw: {"code": 200}            # type: ignore
+        check("account_info 拿不到 profile 时返回空（cookie 无效）",
+              NE.account_info(cookie="MUSIC_U=fake") == {})
+        NE.weapi_post = lambda *a, **kw: {                        # type: ignore
+            "code": 200, "profile": {"nickname": "七月雀", "userId": 42}}
+        info = NE.account_info(cookie="MUSIC_U=real")
+        check("account_info 能解析出昵称和 uid",
+              info.get("nickname") == "七月雀" and info.get("user_id") == 42,
+              str(info))
+        check("空 cookie 直接返回空，不发请求",
+              NE.account_info(cookie="") == {})
+    finally:
+        NE.weapi_post = orig                                    # type: ignore
+
+    # status() 要把账号信息带出去（控制台显示"已登录：xxx"靠它）
+    cfg = Config.load(Path("__selftest_config.json"))
+    drv = NE.NeteasePlaylistDriver(cfg)
+    st = drv.status()
+    check("status() 里带 account 字段", "account" in st, str(sorted(st)))
+    drv.account = {"nickname": "七月雀", "user_id": 42}
+    check("account 会出现在 status() 里",
+          drv.status()["account"].get("nickname") == "七月雀")
+
+
 def test_syntax() -> None:
     """所有源码都必须能编译、所有模块都必须能导入。
 
@@ -2385,6 +2457,7 @@ def main() -> int:
     test_syntax()
     test_web_js()
     test_bat_files()
+    test_netease_auth_codes()
     test_changelog()
     test_config_robustness()
     test_commands()

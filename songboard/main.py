@@ -25,7 +25,7 @@ from .extapi import ExtApiSource
 from .giftgate import GiftLedger
 from .media import MediaInfo, played_track_ids, read_now_playing, similarity
 from .ncmbridge import NeteaseBridge
-from .netease import build_driver, search_song
+from .netease import NeteaseAuthError, build_driver, search_song
 from .store import QueueStore
 from .webui import BoardServer
 
@@ -43,7 +43,7 @@ HELP = """
   clear           清空队列
   mode demo|live  切换演示模式 / 直播间模式
   room 房间号     设置直播间号并重连
-  ne              查看网易云歌单驱动状态
+  ne              查看网易云搜索/cookie 状态
   gift            查看点歌门槛设置
   gift on|off     开关「送礼物才能点」
   gift min 2000   门槛改成 2000 瓜子
@@ -115,6 +115,8 @@ class App:
         self._media_since = 0.0
         self._media_seen_at = 0.0
         self._track_task: asyncio.Task | None = None
+        #: 启动时验一次网易云登录态（见 _check_netease_login）
+        self._login_task: asyncio.Task | None = None
 
     # ---------- 日志与广播 ----------
     def log(self, text: str) -> None:
@@ -304,6 +306,11 @@ class App:
                     try:
                         hits = await asyncio.to_thread(
                             search_song, head.song, cookie, 5)
+                    except NeteaseAuthError as exc:
+                        # cookie 过期 ≠ 搜不到歌。分开报，
+                        # 否则主播会去查歌名，方向完全错了。
+                        self.log(f"⚠️ {exc}")
+                        return
                     except Exception as exc:  # noqa: BLE001
                         self.log(f"⚠️ 搜索《{head.song}》失败：{exc!r}")
                         return
@@ -1031,19 +1038,26 @@ class App:
         """清空贡献记录（主播换规则时可能想重新算）。"""
         self.gifts.reset()
 
-    async def reload_netease(self) -> None:
+    async def reload_netease(self) -> tuple[bool, str]:
+        """重建网易云驱动并验一次登录态。
+
+        返回 (能不能搜歌, 说明) —— 控制台保存 cookie 后要拿它给用户看结果。
+        """
         self.driver = build_driver(self.cfg)
         self.bridge = NeteaseBridge(
             enabled=bool(self.cfg.get("ncm_bridge.enabled", False)),
             timeout=float(self.cfg.get("ncm_bridge.timeout", 3.0) or 3.0),
         )
         ok, msg = await self.driver.test()
-        self.log(("网易云歌单驱动：" if ok else "网易云歌单驱动不可用：") + msg)
+        # 这里检查的其实是"能不能搜到歌"（= cookie 有没有效），
+        # 跟歌单没关系了 —— 文案别再说"歌单驱动"，会让人以为要填歌单。
+        self.log(("网易云搜索：" if ok else "⚠️ 网易云搜索不可用：") + msg)
         if self.cfg.get("ncm_bridge.enabled", False):
             if self.bridge.available(refresh_after=0.0):
                 self.log(f"⚡ 播放队列桥：{self.bridge.describe_safe()}")
             else:
                 self.log(f"⚠️ 播放队列桥不可用：{self.bridge.status()['message']}")
+        return ok, msg
 
     async def simulate_danmaku(self, text: str, user: str = "测试观众",
                               uid: int = 0, *, kind: str = "danmaku",
@@ -1219,10 +1233,29 @@ class App:
         self._status_task = asyncio.create_task(self._status_loop())
         if self.cfg.get("media.watch", True):
             self._track_task = asyncio.create_task(self._track_loop())
+        # 启动时验一次网易云登录态。cookie 过期是很常见的情况，
+        # 早点告诉主播，别等他点了歌才发现"搜不到"（而且以前会误报成
+        # "网易云搜不到《X》"，让人以为是歌名写错了）。
+        self._login_task = asyncio.create_task(self._check_netease_login())
         if open_browser:
             webbrowser.open(f"{base}/control")
 
         await self._repl()
+
+    async def _check_netease_login(self) -> None:
+        """启动时确认 cookie 还能不能用，把账号名记进 driver.status()。
+
+        控制台靠这个显示"已登录：xxx"。没有它的话，`account` 一直是空的，
+        控制台只能显示"cookie 没能验证通过" —— 明明能用却像坏了。
+        """
+        if not self.cfg.get("netease.enabled", False):
+            return                      # 没启用是正常状态，不用报警
+        try:
+            ok, msg = await self.driver.test()
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"⚠️ 网易云登录态检查失败：{exc!r}")
+            return
+        self.log(("网易云搜索：" if ok else "⚠️ 网易云搜索不可用：") + msg)
 
     async def _status_loop(self) -> None:
         while True:

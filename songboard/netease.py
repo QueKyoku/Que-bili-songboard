@@ -31,6 +31,18 @@ MODULUS = (
     "104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7"
 )
 
+#: 网易云"没认出登录态"时返回的 code（实测 2026-09：空 cookie / 假 cookie
+#: 都返回 50000005；301 是历史上见过的"需要登录"）
+AUTH_ERROR_CODES = (50000005, 301)
+
+
+class NeteaseAuthError(RuntimeError):
+    """cookie 无效或已过期。
+
+    单独一个异常类型，是为了让上层能把它和"网断了""这首歌真搜不到"
+    区分开 —— 以前一律报"搜不到《X》"，主播会去查歌名，方向完全错了。
+    """
+
 
 class MusicDriver(ABC):
     name = "base"
@@ -134,6 +146,12 @@ def weapi_post(path: str, payload: dict[str, Any], cookie: str) -> dict:
 def search_song(keyword: str, cookie: str = "", limit: int = 5) -> list[dict]:
     payload = {"s": keyword, "type": 1, "offset": 0, "total": True, "limit": limit}
     res = weapi_post("/cloudsearch/get/web", payload, cookie)
+    code = res.get("code")
+    if code in AUTH_ERROR_CODES:
+        # ⚠️ 这个码是"没认出登录态"。以前它会被当成"这首歌搜不到"，
+        #    主播看到的是"网易云搜不到《稻香》"—— 完全查错方向。
+        raise NeteaseAuthError(
+            f"网易云登录态无效（code={code}），cookie 可能已过期，请重新获取")
     songs = ((res.get("result") or {}).get("songs")) or []
     out = []
     for s in songs:
@@ -149,6 +167,29 @@ def search_song(keyword: str, cookie: str = "", limit: int = 5) -> list[dict]:
     return out
 
 
+def account_info(cookie: str) -> dict[str, Any]:
+    """问网易云"我是谁"——用来确认 cookie 到底有没有效。
+
+    实测（2026-09）：cookie 有效时这个接口返回 profile.nickname / userId；
+    cookie 无效或没填时照样返回 code=200，但**没有 profile** ——
+    所以判据是"能不能拿到 userId"，不是看 code。
+    """
+    if not cookie:
+        return {}
+    try:
+        res = weapi_post("/w/nuser/account/get", {}, cookie)
+    except Exception:  # noqa: BLE001
+        return {}
+    prof = res.get("profile") or res.get("account") or {}
+    uid = prof.get("userId")
+    if not uid:
+        return {}
+    return {
+        "nickname": str(prof.get("nickname") or ""),
+        "user_id": int(uid),
+    }
+
+
 # --------------------------------------------------------------------------- 驱动
 class NeteasePlaylistDriver(MusicDriver):
     """把点歌写进一个网易云歌单；主播自己在该歌单上按顺序播放。"""
@@ -159,6 +200,8 @@ class NeteasePlaylistDriver(MusicDriver):
         self.cookie = _resolve_cookie(str(cfg.get("netease.cookie", "")))
         self.playlist_id = str(cfg.get("netease.playlist_id", "") or "")
         self.last_error = ""
+        #: 登录的账号信息（昵称/uid），由 test() 填；控制台用它显示"已登录：xxx"
+        self.account: dict[str, Any] = {}
         self.added = 0
         self.reorders = 0
         self.cache: dict[str, dict] = {}
@@ -169,6 +212,7 @@ class NeteasePlaylistDriver(MusicDriver):
             "enabled": bool(self.cfg.get("netease.enabled", False)),
             "playlist_id": self.playlist_id,
             "has_cookie": bool(self.cookie),
+            "account": dict(self.account),
             "added": self.added,
             "reorders": self.reorders,
             "last_error": self.last_error,
@@ -289,24 +333,34 @@ class NeteasePlaylistDriver(MusicDriver):
         return True, f"已重排 {len(desired)} 首（点歌顺序 → 播放顺序）"
 
     async def test(self) -> tuple[bool, str]:
+        """检查"搜歌 / 查时长"这条路通不通 —— 也就是 cookie 到底有没有效。
+
+        ⚠️ 以前这里靠读**歌单**来验 cookie。可歌单方案早就废弃了（只插播放
+        队列、一个字节都不写歌单），于是没填歌单 ID 时它会直接报
+        "缺少歌单 ID" —— 对现在的用法纯属误导：主播根本没打算填歌单。
+
+        现在改成问网易云"我是谁"：cookie 有效就能拿到昵称，
+        无效则什么都拿不到（实测这个接口两种情况都返回 code=200，
+        所以判据是"有没有 profile.userId"，不是看 code）。
+        """
         if not self.cookie:
-            return False, "缺少 cookie（网易云登录态）"
-        if not self.playlist_id:
-            return False, "缺少歌单 ID（歌单链接里 id= 后面那串数字）"
+            self.account = {}
+            return False, ("没有填 cookie，搜不了歌（点歌板能用，但歌插不进"
+                           "网易云，因为拿不到歌曲 id）")
         try:
             import asyncio
-            res = await asyncio.to_thread(
-                weapi_post, "/v6/playlist/detail",
-                {"id": self.playlist_id, "n": 1, "s": 0}, self.cookie,
-            )
-        except Exception as exc:
+            info = await asyncio.to_thread(account_info, self.cookie)
+        except Exception as exc:  # noqa: BLE001
             self.last_error = repr(exc)
             return False, f"接口调用失败：{exc!r}"
-        if res.get("code") != 200:
-            self.last_error = str(res.get("code"))
-            return False, f"歌单读取失败 code={res.get('code')}（cookie 可能已过期）"
-        pl = res.get("playlist") or {}
-        return True, f"歌单《{pl.get('name')}》可写，当前 {pl.get('trackCount')} 首"
+        if not info:
+            self.account = {}
+            self.last_error = "cookie 无效"
+            return False, ("cookie 无效或已过期（网易云没认出登录态），"
+                           "请重新复制一份")
+        self.account = info
+        name = info.get("nickname") or f"uid {info.get('user_id')}"
+        return True, f"搜索可用，已登录：{name}"
 
     async def append_song(self, song: str, user: str = "") -> tuple[bool, str, dict]:
         """把歌加进歌单，并保证它落在**最后一位**（追加语义）。

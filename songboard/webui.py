@@ -249,11 +249,15 @@ class BoardHandler(BaseHTTPRequestHandler):
                 if body.get("cookie"):
                     self.ctx["config"]["netease"]["cookie"] = str(body["cookie"])
                 self.ctx["config"].save()
-                self._run_async(self.ctx["reload_netease"]())
+                # 保存后立刻验一次 cookie，并把结果回给控制台 ——
+                # 不然主播只能盯着日志猜"我粘的 cookie 到底对不对"。
+                result = self._run_async(self.ctx["reload_netease"]())
                 if was != enabled:
                     self.ctx["log_change"](
                         "网易云搜索/查时长：" + ("已开启" if enabled else "已关闭"))
-                return self._send_json({"ok": True, "enabled": enabled})
+                ok, msg = result if isinstance(result, tuple) else (True, "")
+                return self._send_json({"ok": True, "enabled": enabled,
+                                        "search_ok": bool(ok), "message": msg})
             if parsed.path == "/api/gift_gate":
                 # 礼物门槛：规则由主播在控制台里配。
                 # 只接受白名单字段，且做强类型转换 —— 前端传来的都是字符串，

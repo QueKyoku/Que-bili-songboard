@@ -155,8 +155,11 @@
         <div class="row">
           <span class="tag" id="neStatus">未启用</span>
         </div>
+        <div class="hint" id="neHint"></div>
         <div class="hint">
-          程序<b>不写入你的歌单</b>——一个字节都不动。<br/>
+          <b>cookie 只干两件事</b>：把歌名搜成歌曲 id、查歌时长。
+          不填也能看点歌板，但歌<b>插不进网易云</b>（拿不到 id）。<br/>
+          程序<b>不写入你的歌单</b>——一个字节都不动。
           点歌只插进网易云的<b>播放队列</b>：一次只保队头在"下一首"，
           等它开始播，再把下一首排上去。<br/>
           需要先注入 <code>bridge\AwooNcmCefBridge.dll</code>（见 <code>tools\inject_bridge.py</code>）。
@@ -397,6 +400,28 @@ function renderStatus(st){
     $('#ggBox').innerHTML = rows.map(r => `<div>${escapeHtml(r)}</div>`).join('');
   }
 
+  // ---- 网易云搜索状态（cookie 到底有没有效）----
+  // 以前这个标签写死在 HTML 里当"未启用"，JS 从来没更新过它 ——
+  // 于是不管 cookie 填没填、有效没效，它都显示"未启用"。
+  const ne2 = st.netease || {};
+  const neTag = $('#neStatus');
+  if (neTag){
+    const acc = ne2.account || {};
+    if (!ne2.enabled){
+      neTag.textContent = '未启用（搜不了歌，歌插不进队列）';
+      neTag.className = 'tag';
+    } else if (acc.nickname || acc.user_id){
+      neTag.textContent = '已登录：' + (acc.nickname || ('uid ' + acc.user_id));
+      neTag.className = 'tag ok';
+    } else if (ne2.has_cookie){
+      neTag.textContent = 'cookie 没能验证通过';
+      neTag.className = 'tag warn';
+    } else {
+      neTag.textContent = '没填 cookie，搜不了歌';
+      neTag.className = 'tag warn';
+    }
+  }
+
   const m = st.media || {};
   const det = m.detected;
   const tl = m.timeline;
@@ -558,8 +583,17 @@ $('#btnNeSave').onclick = async () => {
   // 避免误把 write_playlist / auto_add 打开而动了主播的歌单。
   const body = { enabled: $('#neEnabled').checked };
   if ($('#neCookie').value.trim()) body.cookie = $('#neCookie').value.trim();
-  await api('/api/netease/enable', body);
-  logLine(`网易云：搜索/查时长${body.enabled ? '已开启' : '已关闭'}（歌单始终不写入）`);
+  const r = await api('/api/netease/enable', body);
+  // 保存时服务端会当场验一次 cookie，把结果直接告诉主播，
+  // 省得他盯着日志猜"我粘的到底对不对"
+  const msg = (r && r.message) || '';
+  const ok = r && r.search_ok;
+  logLine('网易云：搜索/查时长' + (body.enabled ? '已开启' : '已关闭')
+          + '（歌单始终不写入）' + (msg ? ' · ' + msg : ''));
+  if (msg && $('#neHint')) {
+    $('#neHint').textContent = (ok ? '✅ ' : '⚠️ ') + msg;
+    $('#neHint').className = ok ? 'hint' : 'hint';
+  }
   $('#neCookie').value = '';
   refresh();
 };

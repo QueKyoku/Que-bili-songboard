@@ -188,6 +188,11 @@ def check_control(browser: str, base: str, seconds: int = 9) -> None:
     check("「预览」链接是绝对地址",
           bool(lk) and lk[0].startswith("http://"), str(lk[:1]))
 
+    # 网易云登录态标签：以前写死在 HTML 里当"未启用"，JS 从来没更新过。
+    ne = text_of(dom, "neStatus")
+    check("网易云登录态标签被实时填上（不再是写死的初始文案）",
+          bool(ne) and ne != "", f"neStatus={ne!r}")
+
     # 顺带确认控制台没有把"写歌单"的老开关又露出来。
     # 只在**代码/JSON** 里找（带引号或是键名），注释里提到不算问题。
     leaked = re.findall(r'["\'](auto_add|playlist_id|write_playlist)["\']'
