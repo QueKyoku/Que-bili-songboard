@@ -1,8 +1,8 @@
 """扫码登录的业务逻辑：拿 unikey → 轮询 → 拿到 cookie。
 
 单独抽出来是因为有两个入口要用：
-  * `login_qrcode.py` —— 命令行版（终端画二维码）
-  * `扫码登录.pyw`     —— 图形界面版（双击就能用，给不想碰命令行的人）
+  * `tools/login_qrcode.py` —— 命令行版（终端画二维码）
+  * `tools/扫码登录.pyw`     —— 图形界面版（由根目录的 扫码登录.bat 拉起）
 两边共用这一份，免得写两遍、改一处漏一处。
 """
 from __future__ import annotations

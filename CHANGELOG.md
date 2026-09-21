@@ -8,6 +8,33 @@
 > ⚠️ 本项目依赖 B 站弹幕长连接和网易云的**非官方接口**，
 > 接口一改就可能失效。补丁版本里也可能会出现"适应上游变更"的修复。
 
+## [0.4.2] - 2026-09-20
+
+### 变更
+
+- **扫码登录的文件都收进 `tools/`，根目录只留 `扫码登录.bat` 一个入口**：
+
+  | 位置 | 是什么 |
+  | --- | --- |
+  | `扫码登录.bat`（根目录） | 唯一入口：检查环境 → 拉起窗口 |
+  | `tools/扫码登录.pyw` | 图形界面本体 |
+  | `tools/login_qrcode.py` | 命令行版（终端里画二维码） |
+
+  > 为什么不能合并成一个文件：`.bat` 负责"检查环境 + 启动"，
+  > 但**批处理画不了窗口**，所以图形界面必须有个 `.pyw` 本体；
+  > 而没装 Python 时 `.pyw` 双击又不会被执行，所以 `.bat` 这个入口也省不掉。
+  > 两者是分工，但可以让**根目录只暴露一个**。
+
+- 跟着同步了所有引用：`扫码登录.bat` 的启动路径、`tools/build_gui.ps1` 的打包目标、
+  `tools/check_gui.py` 的加载路径，以及各处注释和 README。
+  改完重新验证过：`扫码登录.bat` 能拉起窗口、`tools/build_gui.ps1` 打出的 exe 能运行、
+  `tools/check_gui.py` 全过。
+- 顺手清掉了本地的构建产物（`dist/`、`build/`、`*.spec`、根目录那个 23 MB 的 exe）——
+  它们本来就在 `.gitignore` 里，只是留在文件夹里碍眼。要 exe 随时跑一次
+  `tools/build_gui.ps1` 就有。
+- `CHANGELOG.md` 里的历史记录**有意不改**：那几条记的是当时的事实，
+  那时文件确实叫 `扫码登录.pyw` 且放在根目录。
+
 ## [0.4.1] - 2026-09-20
 
 ### 修复
@@ -333,6 +360,7 @@
 - 网易云的接口是非官方的，可能随官方改动失效。
 - 桥需要每次重新注入（网易云一重启就失效）。
 
+[0.4.2]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.2.8...v0.3.0

@@ -6,7 +6,7 @@ Chrome / Edge 127+ 给 cookie 加了 App-Bound Encryption（值以 `v20` 开头�
 但每条 cookie 都是 v20，一条都解不出来）。扫码是唯一"全自动"的路子。
 
 用法：
-    python login_qrcode.py
+    python tools\login_qrcode.py
 
 流程：
     拿 unikey → 终端画出二维码 → 手机上的【网易云音乐】App 扫码并确认
@@ -23,7 +23,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent   # tools/ 的上一级才是项目根（config.json 在那儿）
 sys.path.insert(0, str(ROOT))
 
 # 扫码时要实时看到「等待扫码 → 已扫码请确认」的进度。默认情况下

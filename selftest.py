@@ -1118,7 +1118,7 @@ def test_cookie_extract() -> None:
     这样的字段名，直接失败。
 
     提取逻辑现在住在 songboard/cookies.py —— set_cookie.py（手动复制）
-    和 login_qrcode.py（扫码登录）共用同一套。
+    和扫码登录那两个入口（tools/login_qrcode.py、tools/扫码登录.pyw）共用同一套。
     """
     print("\n== cookie 提取（songboard/cookies.py） ==")
     from songboard.cookies import build_cookie, cookies_from_response_headers, \

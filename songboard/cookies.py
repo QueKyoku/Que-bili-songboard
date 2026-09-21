@@ -2,7 +2,8 @@
 
 被两个地方用：
   * `set_cookie.py`   —— 用户从 F12 复制一堆东西进来
-  * `login_qrcode.py` —— 扫码登录成功后，从响应的 Set-Cookie 里收凭据
+  * 扫码登录（tools/login_qrcode.py、tools/扫码登录.pyw）—— 成功后从
+    响应的 Set-Cookie 里收凭据
 
 ⚠️ 不能按 `;` 拆分再配对。实测用户会粘进来的形态太多：
 

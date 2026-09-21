@@ -1,4 +1,4 @@
-﻿# 把「扫码登录.pyw」打包成单个 exe，给不想碰命令行的人用。
+﻿# 把 tools\扫码登录.pyw 打包成单个 exe，给不想碰命令行的人用。
 #
 #     powershell -ExecutionPolicy Bypass -File tools\build_gui.ps1
 #
@@ -7,7 +7,7 @@
 # ⚠️ 打好之后**要把 exe 放到项目根目录**（和 config.json 同一个文件夹）再双击 ——
 #    程序是按 exe 所在目录去找 config.json 的。
 #
-# 不想装 PyInstaller（约几十 MB）的话，其实直接双击「扫码登录.pyw」也能用，
+# 不想装 PyInstaller（约几十 MB）的话，其实直接双击根目录的「扫码登录.bat」也能用，
 # 效果一样，只是要求机器上装了 Python 和 qrcode。
 
 # ⚠️ 不能用 "Stop"：下面要用 `python -c "import 某模块"` 探测依赖，
@@ -67,7 +67,7 @@ python -m PyInstaller `
     --hidden-import qrcode `
     --collect-submodules songboard `
     --paths . `
-    "扫码登录.pyw"
+    "tools\扫码登录.pyw"
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""

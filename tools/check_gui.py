@@ -1,4 +1,4 @@
-"""验证「扫码登录.pyw」能正常起来、二维码真的画出来了。
+"""验证 tools/扫码登录.pyw 能正常起来、二维码真的画出来了。
 
     python tools/check_gui.py
 
@@ -14,7 +14,7 @@ import tkinter
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent   # tools/ 的上一级才是项目根
 
-spec = importlib.util.spec_from_file_location("gui", ROOT / "扫码登录.pyw")
+spec = importlib.util.spec_from_file_location("gui", ROOT / "tools" / "扫码登录.pyw")
 gui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gui)          # __name__ != "__main__"，不会自动跑 main()
 

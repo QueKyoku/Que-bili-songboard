@@ -20,7 +20,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import font as tkfont
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent   # tools/ 的上一级才是项目根（config.json 在那儿）
 # ⚠️ 打包成 exe 之后（PyInstaller --onefile），__file__ 指向的是解包出来的
 #    临时目录，config.json 不在那儿。所以要改用 exe 自己的所在目录 ——
 #    也就是说 **exe 要放在项目根目录**（和 config.json 同一个文件夹）。

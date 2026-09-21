@@ -82,7 +82,7 @@ echo       多半是用了精简版/特殊发行版。用官方安装包装一次就有了：
 echo       https://www.python.org/downloads/
 echo.
 echo       不想换 Python 的话，改成命令行版扫码：
-echo           python login_qrcode.py
+echo           python tools\login_qrcode.py
 echo       （在终端里画二维码，效果一样）
 echo.
 pause
@@ -93,8 +93,8 @@ echo   环境没问题，正在打开扫码窗口...
 rem 用 pythonw 启动，不留黑色控制台窗口；没有 pythonw 就退回 python
 where pythonw >nul 2>&1
 if errorlevel 1 (
-    python "%~dp0扫码登录.pyw"
+    python "%~dp0tools\扫码登录.pyw"
 ) else (
-    start "" pythonw "%~dp0扫码登录.pyw"
+    start "" pythonw "%~dp0tools\扫码登录.pyw"
 )
 exit /b 0

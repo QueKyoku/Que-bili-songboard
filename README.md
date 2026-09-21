@@ -8,7 +8,7 @@
 git clone https://github.com/QueKyoku/Que-bili-songboard.git
 ```
 
-当前版本 **v0.4.1** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
+当前版本 **v0.4.2** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
 `python -m songboard --version` 可以直接问程序自己
 
 给 B 站主播用的点歌工具。观众发一条 `点歌 稻香`，程序就会把这首歌加到网易云的
@@ -676,7 +676,7 @@ cookie 这时候已经写进 `config.json` 了，**不用重启程序**。
 > 所以负责"检查环境"的入口必须是一个**不需要 Python 就能运行**的东西，
 > 也就是 `.bat`。
 >
-> 装了 Python 的话，直接双击 `扫码登录.pyw` 也能用（效果一样），
+> 装了 Python 的话，直接双击 `tools\扫码登录.pyw` 也能用（效果一样），
 > 只是它自己只能补 `qrcode`（界面上有「自动安装」按钮），管不了 Python 本身。
 
 - 扫完没及时确认、或者二维码过期了，点「重新生成二维码」再来一次
@@ -684,7 +684,7 @@ cookie 这时候已经写进 `config.json` 了，**不用重启程序**。
   把产物放到项目根目录再双击（项目结构见第十二章）
 - 主菜单 `启动.bat` 里也加了 `[4] 扫码登录网易云`，从那儿进也一样
 
-没有手机、或者不想装东西的话，命令行版效果一样：`python login_qrcode.py`
+没有手机、或者不想装东西的话，命令行版效果一样：`python tools\login_qrcode.py`
 （在终端里画二维码），再不行就走 9.2 的手动复制。
 
 > **为什么不做"自动读浏览器里的 cookie"？** 试过了，现在**做不到**：
@@ -736,7 +736,7 @@ python set_cookie.py
 
 | 方法 | 操作 | 说明 |
 | --- | --- | --- |
-| **扫码登录**（最省事） | `python login_qrcode.py`，手机扫一下 | 完全不碰浏览器；要先 `pip install qrcode` |
+| **扫码登录**（最省事） | 双击根目录的 `扫码登录.bat`，手机扫一下 | 完全不碰浏览器；缺的依赖它会自己装 |
 | **复制请求头** | F12 → Network → 右键请求 → Copy → Copy request headers | 一次拿到完整的，配合 `set_cookie.py` 全自动 |
 | **Copy as cURL** | F12 → Network → 右键请求 → Copy → Copy as cURL | 一样省事，脚本也认 |
 | **Application 面板** | F12 → Application → Cookies → `https://music.163.com` → 复制 `MUSIC_U` 和 `__csrf` | 最直观，但要分两次复制、手动拼成 `MUSIC_U=xxx; __csrf=yyy` |
@@ -1058,8 +1058,10 @@ tools/
   list_netease_windows.py  找网易云主进程
   gsm_probe.ps1            列出系统媒体会话
   check_overlay_dom.py     无头浏览器真跑叠加层/控制台
+  扫码登录.pyw             扫码登录的图形界面本体（由根目录的 .bat 拉起）
+  login_qrcode.py          扫码登录的命令行版（终端里画二维码）
   check_gui.py             检查扫码登录窗口能不能起来
-  build_gui.ps1            把「扫码登录.pyw」打包成单个 exe
+  build_gui.ps1            把扫码登录的图形界面打包成单个 exe
   playercap/               可选的外部媒体信息源（exe 未入库）
 
 bridge/                    编译产物（DLL，已 gitignore）
@@ -1075,9 +1077,7 @@ e2e_check.py               端到端检查（⚠️ 有副作用）
 check_integration.py       集成检查
 demo_*.py                  手动演练脚本（demo_gift.py = 模拟送礼试门槛）
 diag_room.py               弹幕直连诊断
-扫码登录.bat              [双击即用] 检查环境 + 拉起扫码登录窗口
-扫码登录.pyw              图形界面本体（也可以直接双击，但要先有 Python）
-login_qrcode.py            扫码登录（命令行版，在终端画二维码）
+扫码登录.bat              [双击即用] 扫码登录的唯一入口（检查环境 + 拉窗口）
 set_cookie.py              手动复制 cookie 时用（读剪贴板 + 自动验证）
 启动.bat / 启动外部媒体源.bat
 ```

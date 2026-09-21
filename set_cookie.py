@@ -45,7 +45,7 @@ def build_cookie(raw: str) -> str:
         print("     · 复制成了别的东西（比如整页 HTML、或者只是 MUSIC_U 的值）")
         print("     · 复制的地方不是 music.163.com（换了个标签页？）")
         print("   正确的拿法见 README 第九章「快捷获取 Cookie」，")
-        print("   或者干脆用扫码登录：python login_qrcode.py")
+        print("   或者干脆用扫码登录：双击根目录的 扫码登录.bat")
         return ""
     order = [k for k in KEEP if k in found]
     print(f"✅ 提取到 {len(found)} 个字段：{order}")
