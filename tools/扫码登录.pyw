@@ -137,6 +137,15 @@ class App:
     def install_qrcode(self) -> None:
         if self.busy:
             return
+        # ⚠️ 打包成 exe 之后 sys.executable 是**这个 exe 自己**，不是 python.exe。
+        #    拿它去跑 `-m pip install` 不但装不上，还可能把程序又启动一遍
+        #    （那些参数会被当成脚本的 argv）。打包版本来就该自带 qrcode，
+        #    真缺了只能重新打包，所以这里必须拦住。
+        if getattr(sys, "frozen", False):
+            self.set_status("打包版装不了 pip 包", ERR)
+            self.set_detail("这个 exe 应该自带 qrcode。请改用项目目录里的 "
+                            "扫码登录.bat，或重新跑一次 tools\\build_gui.ps1")
+            return
         self.busy = True
         self.set_status("正在安装 qrcode…", WARN)
         self.set_detail("装完会自动继续，不用管这个窗口")

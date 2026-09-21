@@ -76,7 +76,76 @@ app.on_poll(800, "二维码过期了，点「重新生成」再扫一次")
 root.update()
 print(f"  状态：{app.status.cget('text')!r}")
 print(f"  说明：{app.detail.cget('text')!r}")
+root.update()
+
+# ─────────────────────────────────────────────────────────
+# 下面两条是「最容易碰到、但平时测不到」的分支
+# ─────────────────────────────────────────────────────────
+print("\n=== 模拟「没装 qrcode」（新用户第一次用最可能遇到）===")
+# ⚠️ 要 mock `gui.qrcode_available`，不能 mock `songboard.qrlogin.qrcode_available`：
+#    .pyw 里是 `from songboard.qrlogin import qrcode_available`，
+#    它拿到的是**自己命名空间里的那个引用**，改源模块没用（第一次就写错了，
+#    结果测试假失败 —— 好在测试自己也会被验证）。
+import queue as _queue                      # noqa: E402
+real_avail = gui.qrcode_available
+root2 = tkinter.Tk()
+try:
+    gui.qrcode_available = lambda: False          # type: ignore
+    app2 = gui.App(root2)
+    for _ in range(6):
+        root2.update()
+        time.sleep(0.1)
+    st2 = app2.status.cget("text")
+    dt2 = app2.detail.cget("text")
+    btn_visible = app2.btn_install.winfo_manager() != ""
+    print(f"  状态：{st2!r}")
+    print(f"  说明：{dt2!r}")
+    print(f"  「自动安装」按钮出现了：{btn_visible}")
+    checks += [
+        ("没装 qrcode 时明确说了这件事", "qrcode" in st2),
+        ("给出了「自动安装」按钮", btn_visible),
+        ("告诉用户装完会自动继续", "自动" in dt2),
+    ]
+finally:
+    gui.qrcode_available = real_avail            # type: ignore
+    root2.destroy()
+
+print("\n=== 模拟「打包成 exe 后点自动安装」===")
+# 打包后 sys.executable 是 exe 自己，拿它跑 -m pip 会出事（甚至把程序再启动一次），
+# 所以那条分支必须拦住 —— 这里故意把 sys.frozen 设成 True 来验它。
+root3 = tkinter.Tk()
+try:
+    app3 = gui.App.__new__(gui.App)              # 不走 __init__（它会去请求网络）
+    app3.root = root3
+    app3.busy = False
+    app3.status = tkinter.Label(root3, text="")
+    app3.detail = tkinter.Label(root3, text="")
+    app3.q = _queue.Queue()
+    real_frozen = getattr(sys, "frozen", None)
+    sys.frozen = True                            # type: ignore
+    try:
+        app3.install_qrcode()
+    finally:
+        if real_frozen is None:
+            del sys.frozen                       # type: ignore
+        else:
+            sys.frozen = real_frozen             # type: ignore
+    st3 = app3.status.cget("text")
+    dt3 = app3.detail.cget("text")
+    print(f"  状态：{st3!r}")
+    print(f"  说明：{dt3!r}")
+    checks += [
+        ("打包版不会去跑 pip（那会把 exe 自己当 python）", "装不了" in st3),
+        ("告诉用户改用 .bat 或重新打包", "build_gui.ps1" in dt3),
+    ]
+finally:
+    root3.destroy()
 
 root.destroy()
+print("\n=== 汇总 ===")
+allok = True
+for name, good in checks:
+    allok &= good
+    print(f"  [{'PASS' if good else 'FAIL'}] {name}")
 print(f"\n全部通过：{allok}")
 sys.exit(0 if allok else 1)

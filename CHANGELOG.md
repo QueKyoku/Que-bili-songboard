@@ -8,6 +8,30 @@
 > ⚠️ 本项目依赖 B 站弹幕长连接和网易云的**非官方接口**，
 > 接口一改就可能失效。补丁版本里也可能会出现"适应上游变更"的修复。
 
+## [0.4.4] - 2026-09-20
+
+### 修复
+
+- **打包版点「自动安装 qrcode」会把 exe 自己当成 python 用。**
+  `install_qrcode()` 里用的是 `sys.executable`，而**打包成 exe 之后它就是
+  这个 exe 自己**，不是 `python.exe` —— 拿它去跑 `-m pip install qrcode`
+  不但装不上，那些参数还会被当成脚本的 `argv`（可能把程序**再启动一遍**）。
+  现在打包版会直接拦住，并告诉用户该用 `扫码登录.bat` 或重新打包。
+  （触发条件是"打包时漏了 qrcode 且用户点了按钮"，不常见，但一旦撞上
+  表现会非常诡异，所以必须挡。）
+
+### 新增
+
+- `tools/check_gui.py` 补了两条**以前从没被真实测过**的分支：
+  - **没装 qrcode 时**的界面状态（新用户第一次用最可能遇到的情况）——
+    按钮有没有出现、提示说不说得清楚
+  - **打包版点自动安装**——确认它不会真去跑 pip
+
+  写这两条测试时我自己也踩了一次：mock 错了对象
+  （`.pyw` 里是 `from songboard.qrlogin import qrcode_available`，
+  改源模块的属性没用，得改它自己命名空间里那个引用），
+  测试当场假失败 —— 正好说明**测试本身也需要被验证**。
+
 ## [0.4.3] - 2026-09-20
 
 这一版是**整体复查**的产物：自检一直是全绿的，但把项目从头捋了一遍，
@@ -397,6 +421,7 @@
 - 网易云的接口是非官方的，可能随官方改动失效。
 - 桥需要每次重新注入（网易云一重启就失效）。
 
+[0.4.4]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.0...v0.4.1
