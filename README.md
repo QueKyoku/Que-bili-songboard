@@ -11,7 +11,7 @@ git clone https://github.com/QueKyoku/Que-bili-songboard.git
 当前版本 **v0.5.0** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
 `python -m songboard --version` 可以直接问程序自己
 
-给 B 站主播用的点歌工具。观众发一条 `点歌 稻香`，程序就会把这首歌加到网易云的
+给 B 站主播用的点歌工具。观众发一条 `点歌 起风了`，程序就会把这首歌加到网易云的
 **播放队列**里，同时把点歌板作为网页叠加层显示在直播画面上。
 
 **不需要给直播姬装插件** —— 直播姬/OBS 都不支持第三方插件，所以这是一个独立的小程序：
@@ -156,7 +156,7 @@ python -m songboard [选项]
 ```
 回车            查看状态
 n / next        下一首（切歌）
-a 歌名          手动加入队列        例：a 稻香
+a 歌名          手动加入队列        例：a 起风了
 r 序号          移除队列里第 N 首
 top 序号        把第 N 首置顶
 clear           清空队列
@@ -306,7 +306,7 @@ Windows 的 `LoadLibrary` 是**按路径**计引用的，从 A 路径注入过�
 原有队列完整保留，不会挤掉任何歌。对照实验：
 
 ```
-ADD_NEXT(稻香, 原位置[0])  →  稻香移动到 [6]（当前曲目在 [5]）
+ADD_NEXT(起风了, 原位置[0])  →  起风了移动到 [6]（当前曲目在 [5]）
 曲目集合完全没变
 ```
 
@@ -493,8 +493,8 @@ gift reset          # 清空累计
 ```bash
 python demo_gift.py --status                    # 看当前门槛和贡献排行
 python demo_gift.py 小明 1500                   # 小明送 1500 瓜子
-python demo_gift.py 小明 1500 --ask 稻香        # 送完再让他点一首，直接看放不放行
-python demo_gift.py 小刚 99999 --free --ask 稻香  # 免费礼物：应该被拦
+python demo_gift.py 小明 1500 --ask 起风了        # 送完再让他点一首，直接看放不放行
+python demo_gift.py 小刚 99999 --free --ask 起风了  # 免费礼物：应该被拦
 python demo_gift.py 小明 --guard 3             # 模拟上舰（3=舰长）
 python demo_gift.py 小明 --sc 30               # 模拟 30 元醒目留言
 python demo_gift.py --reset                     # 清空所有累计
@@ -827,7 +827,7 @@ python set_cookie.py --cookie "MUSIC_U=xxx; __csrf=yyy"
 
 处理办法就是按 9.1 重新走一遍，不用重启程序。
 
-> ⚠️ 旧版本会把这种情况误报成「网易云搜不到《稻香》」，让人跑去检查歌名对不对。
+> ⚠️ 旧版本会把这种情况误报成「网易云搜不到《起风了》」，让人跑去检查歌名对不对。
 > 0.2.6 起改成明确报「登录态异常」，看到那句就是该换 cookie 了。
 
 ---
@@ -901,8 +901,8 @@ python tools/check_overlay_dom.py http://127.0.0.1:8800/overlay
 
 ```bash
 python demo_full.py      # 往点歌板点 5 首，观察是否按顺序进播放队列
-python demo_service.py "点歌 稻香" 观众A   # 对运行中的服务点一首歌
-python demo_gift.py 小明 1500 --ask 稻香  # 模拟小明送 1500 瓜子，再看他能不能点歌
+python demo_service.py "点歌 起风了" 观众A   # 对运行中的服务点一首歌
+python demo_gift.py 小明 1500 --ask 起风了  # 模拟小明送 1500 瓜子，再看他能不能点歌
 python demo_flow.py      # 不连直播间，走完整业务逻辑
 ```
 
@@ -1011,7 +1011,7 @@ B 站弹幕服务器**不响应 websocket 协议层 ping**，所以库自带的�
 不确定的时候直接模拟一遍（不用求观众真送）：
 
 ```bash
-python demo_gift.py 小明 1500 --ask 稻香
+python demo_gift.py 小明 1500 --ask 起风了
 ```
 
 **`启动.bat` 里中文乱码，或者菜单少了一行（比如找不到 `[2]`）？**

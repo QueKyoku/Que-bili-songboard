@@ -9,7 +9,7 @@
 用法：
 
     python demo_gift.py 小明 1500              # 小明送 1500 瓜子的付费礼物
-    python demo_gift.py 小明 1500 --ask 稻香    # 再让小明点一首，看放不放行
+    python demo_gift.py 小明 1500 --ask 起风了    # 再让小明点一首，看放不放行
     python demo_gift.py 小明 0 --free          # 免费礼物（银色瓜子）
     python demo_gift.py 小明 --guard 3         # 小明上舰（3=舰长）
     python demo_gift.py 小明 --sc 30           # 小明发 30 元醒目留言

@@ -160,7 +160,7 @@ def search_song(keyword: str, cookie: str = "", limit: int = 5) -> list[dict]:
     code = res.get("code")
     if code in AUTH_ERROR_CODES:
         # ⚠️ 这个码是"没认出登录态"。以前它会被当成"这首歌搜不到"，
-        #    主播看到的是"网易云搜不到《稻香》"—— 完全查错方向。
+        #    主播看到的是"网易云搜不到《起风了》"—— 完全查错方向。
         raise NeteaseAuthError(
             f"网易云登录态无效（code={code}），cookie 可能已过期，请重新获取")
     songs = ((res.get("result") or {}).get("songs")) or []

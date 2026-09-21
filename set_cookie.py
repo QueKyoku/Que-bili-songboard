@@ -4,7 +4,7 @@
     python set_cookie.py                     # 从剪贴板读（推荐）
     python set_cookie.py --cookie "MUSIC_U=..."   # 直接给
     python set_cookie.py --test              # 只验证当前配置里的 cookie
-    python set_cookie.py --search 稻香        # 顺带搜一首歌看看通不通
+    python set_cookie.py --search 起风了        # 顺带搜一首歌看看通不通
 
 它是"傻瓜式"的：不管你是复制了纯 cookie、带 `Cookie:` 前缀的一行、
 F12 里"Copy request headers"的**一整块**、还是"Copy as cURL"的**整条命令**，

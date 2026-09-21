@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -43,8 +44,15 @@ _BRACKET = re.compile(r"[（(\[【][^）)\]】]*[）)\]】]")
 
 
 def normalize(text: str) -> str:
-    """归一化：小写、去括号标注、去标点空格、去常见后缀，用于松弛比较。"""
-    t = (text or "").lower()
+    """归一化：统一 Unicode 形式、小写、去括号标注、去标点空格、去常见后缀。
+
+    ⚠️ 第一步的 Unicode 规范化不能省。日文的浊音有**两种写法**：
+    预组合的「ず」是 U+305A，组合形式是 U+3059 U+3099 —— 看起来一模一样，
+    字节却不同。网易云返回来的是组合形式，用户打字/点歌用的是预组合形式，
+    不统一的话相似度只有 0.33（实测「すずめ」vs「すずめ feat.十明」），
+    播放对齐就认不出是同一首。带浊音的日文歌全中招。
+    """
+    t = unicodedata.normalize("NFC", text or "").lower()
     t = _BRACKET.sub("", t)
     t = _PUNCT.sub("", t)
     for suffix in ("official", "mv", "live", "完整版", "高音质", "无损", "cover", "翻唱"):

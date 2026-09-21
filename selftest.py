@@ -327,6 +327,16 @@ def test_media_parse() -> None:
     check("相似度：不相干的歌要低分", similarity("起风了", "孤勇者") < 0.5,
           f"{similarity('起风了', '孤勇者'):.2f}")
     check("normalize 去掉尾部噪声", normalize("稻香 official") == "稻香")
+    # 日文浊音的两种 Unicode 写法必须当成同一首：网易云返回的是"组合浊点"
+    # 形式（す + ゛），用户点歌打的是"预组合"形式（ず），看着一模一样但字节不同。
+    # 不统一的话相似度只有 0.33，含浊音的日文歌（が/ざ/ず/だ/ば/ぱ 行）
+    # 在播放对齐时会认不出是同一首（实测「すずめ」）。
+    check("日文浊音：预组合与组合写法视为同一首",
+          similarity("すずめ", "す\u3059\u3099め") == 1.0,
+          str(similarity("すずめ", "す\u3059\u3099め")))
+    check("日文歌带 feat. 后缀仍能匹配",
+          similarity("すずめ", "すずめ feat.十明") >= 0.85,
+          f"{similarity('すずめ', 'すずめ feat.十明'):.3f}")
 
     # 真实读取（本机有播放器才有内容，没有也不算失败）
     live = read_netease_title()

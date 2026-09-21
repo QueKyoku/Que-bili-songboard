@@ -152,7 +152,7 @@ def parse_external_payload(
     """把外部服务的 JSON 归一化成 MediaInfo。认不出曲名就返回 None。
 
     兼容常见的两种形态：
-      · 裸对象：{"title": "稻香", "position": 60, ...}
+      · 裸对象：{"title": "起风了", "position": 60, ...}
       · 信封对象：{"code":0, "msg":"success", "player":"cloudmusicv3", "data": {...}}
         （Metabox-Nexus-PlayerCap 就是这种，真实数据在 data 里）
     """
