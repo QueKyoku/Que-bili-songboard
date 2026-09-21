@@ -64,6 +64,17 @@
 <body>
 <div class="wrap">
   <h1><span>点歌板</span> 控制台</h1>
+
+  <!-- 有新版本时顶上提醒。查不到（断网）时整条不显示，不会误导。 -->
+  <div class="card" id="updateBar"
+       style="display:none;margin-bottom:14px;border-color:rgba(255,204,85,.5)">
+    <h2 style="margin-bottom:8px">🔔 有新版本 <span class="tag warn" id="updateVer"></span></h2>
+    <div class="row">
+      <span class="grow" id="updateText" style="font-size:13px"></span>
+      <a id="updateLink" href="#" target="_blank" rel="noreferrer">看更新日志</a>
+      <button class="ghost" id="btnUpdateHide" type="button">知道了</button>
+    </div>
+  </div>
   <div class="muted">叠加层地址（直播姬 / OBS 加「浏览器源」时填这个）：
     <div class="row" style="margin-top:6px">
       <input class="grow" id="overlayUrl" readonly value="/overlay" />
@@ -79,7 +90,7 @@
   <div class="grid">
     <div>
       <div class="card">
-        <h2><span class="dot" id="connDot"></span>连接状态 <span class="tag" id="modeTag">-</span></h2>
+        <h2><span class="dot" id="connDot"></span>连接状态 <span class="tag" id="modeTag">-</span> <span class="tag" id="verTag"></span></h2>
         <div class="row">
           <button class="primary" id="btnDemo">演示模式</button>
           <button id="btnLive">连直播间</button>
@@ -265,6 +276,10 @@ let cfg = {}, lastLogTs = 0;
 // 队列列表的内容指纹：没变就不重建 DOM（否则每 2 秒闪一次，
 // 还会把正在点的按钮抽走）
 let lastQueueKey = null;
+// 已经点过"知道了"的版本号：同一个版本只烦一次（存在 sessionStorage，
+// 刷新页面不再弹，重开标签页才会再提醒一次）
+let updateSeen = '';
+try { updateSeen = sessionStorage.getItem('updateSeen') || ''; } catch (e) {}
 
 function logLine(text){
   const el = document.getElementById('log');
@@ -357,9 +372,32 @@ function renderState(snap){  const cur = snap.current;
     : '队列是空的';
 }
 
+// ---- 版本 / 更新提醒 ----
+// 服务端查不到（断网、被 GitHub 限流）时给的是 checked=false，
+// 这时**什么都不显示** —— 不能因为查不到就写"已是最新"，那是骗人。
+// st.version 整个缺失也要当没事（比如浏览器缓存了旧页面配新服务端）。
+function renderVersion(st){
+  const v = (st && st.version) || {};
+  const tag = $('#verTag');
+  if (tag) {
+    tag.textContent = v.current ? `v${v.current}` : '';
+    tag.className = 'tag ' + (v.has_update ? 'warn' : (v.checked ? 'ok' : ''));
+  }
+  const bar = $('#updateBar');
+  if (!bar) return;
+  const newer = !!(v.has_update && v.latest);
+  bar.style.display = (newer && v.latest !== updateSeen) ? '' : 'none';
+  if (newer) {
+    $('#updateVer').textContent = `v${v.latest}`;
+    $('#updateText').textContent = `当前 v${v.current}，最新 v${v.latest}`;
+    $('#updateLink').href = v.url || '#';
+  }
+}
+
 function renderStatus(st){
   const dot = $('#connDot');
   dot.className = 'dot ' + (st.connected ? 'on' : 'off');
+  renderVersion(st);
   const room = st.room || {};
   // 房间名写进标签里：填错房间号时（填成别人的房间）连接一切正常、
   // 就是永远收不到弹幕 —— 把房间名亮出来一眼就能看出不对
@@ -523,6 +561,12 @@ function connect(){
 }
 
 // ---- 事件绑定 ----
+// "知道了"：同一个版本不再提醒（刷新页面也不弹，重开标签页才再提醒一次）
+$('#btnUpdateHide').onclick = () => {
+  updateSeen = $('#updateVer').textContent.replace(/^v/, '');
+  try { sessionStorage.setItem('updateSeen', updateSeen); } catch (e) {}
+  $('#updateBar').style.display = 'none';
+};
 $('#btnDemo').onclick = async () => { await api('/api/mode', {mode:'demo'}); logLine('已切到演示模式'); };
 $('#btnLive').onclick = async () => { await api('/api/mode', {mode:'live'}); logLine('已切到直播间模式'); };
 $('#btnSetRoom').onclick = async () => {

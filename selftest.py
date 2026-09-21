@@ -812,6 +812,158 @@ def test_web_js() -> None:
         print("  [SKIP] 没装 node，只做了重复声明的粗筛（装 node 可做完整编译）")
 
 
+def test_version_check() -> None:
+    """版本比较 + "控制台提醒有新版本"。
+
+    重点防两件事：
+      1. **拿字符串比版本号** —— `'0.10.0' < '0.9.9'` 在字符串比较下是成立的，
+         结果就是"发了 0.10.0，全员收不到更新提示"，而且几乎不可能被发现
+         （因为只有当版本号跨到两位数时才复现）。
+      2. **查更新把主流程拖死** —— 断网时 urlopen 会一直等到超时，
+         所以它必须是独立后台任务，而且**永远不抛异常**。
+    """
+    print("\n== 版本检查 / 更新提醒 ==")
+    import asyncio as _aio
+    import json as _json
+    import re as _re
+    import tempfile as _tempfile
+
+    from songboard import __version__, version_check as vc
+    from songboard.config import Config
+    from songboard.main import App
+
+    # ---------- 解析 ----------
+    for text, want in (("v0.5.0", (0, 5, 0)), ("0.5", (0, 5)),
+                       ("1.2.3.4", (1, 2, 3, 4)), ("V2.0", (2, 0))):
+        check(f"parse_version({text!r})",
+              vc.parse_version(text) == want, str(vc.parse_version(text)))
+    for bad in ("latest", "", "v", "v1.x", None, 5, "1.2.3-beta", "1.2.3-beta.1"):
+        check(f"parse_version 不认 {bad!r}",
+              vc.parse_version(bad) is None, str(vc.parse_version(bad)))
+
+    # ---------- 比较 ----------
+    check("0.10.0 比 0.9.9 新（字符串比较会判反）",
+          vc.is_newer("0.10.0", "0.9.9"), "按字符串比会得到 False")
+    check("0.5.0 不比 0.5.0 新", not vc.is_newer("0.5.0", "0.5.0"))
+    check("v 前缀不影响比较",
+          vc.is_newer("v0.5.1", "0.5.0") and not vc.is_newer("0.5.1", "v0.5.1"))
+    check("1.0 和 1.0.0 当成同一个版本",
+          not vc.is_newer("1.0", "1.0.0") and not vc.is_newer("1.0.0", "1.0"))
+    check("当前版本更旧时才算「有新版本」",
+          vc.is_newer("0.6.0", "0.5.0") and not vc.is_newer("0.4.0", "0.5.0"))
+    check("解析不出来就一律不出声（宁可不提醒，也不瞎报有新版）",
+          not vc.is_newer("latest", "0.5.0") and not vc.is_newer("0.5.1", None)
+          and not vc.is_newer(None, "0.5.0"))
+
+    # ---------- 从一堆 tag 里挑最新 ----------
+    check("pick_latest 挑数字最大的，忽略非版本 tag",
+          vc.pick_latest(["latest", "v0.2.0", "v0.10.1", "v0.9.9", "test"])
+          == "v0.10.1",
+          str(vc.pick_latest(["latest", "v0.2.0", "v0.10.1", "v0.9.9", "test"])))
+    check("pick_latest 全是垃圾 tag 时返回 None",
+          vc.pick_latest(["latest", "nightly"]) is None
+          and vc.pick_latest([]) is None and vc.pick_latest(None) is None)
+
+    # ---------- 查失败 = "不知道"，不能抛、也不能说"已是最新" ----------
+    def boom(_timeout):
+        raise OSError("断网")
+
+    st = vc.check("0.5.0", fetcher=boom)
+    check("断网时 check() 不抛异常，返回 checked=False",
+          st["checked"] is False and st["error"] == "OSError", str(st))
+    check("断网时绝不显示「已是最新」",
+          st["has_update"] is False and st["latest"] is None
+          and "已是最新" not in vc.message(st), vc.message(st))
+
+    st = vc.check("0.5.0", fetcher=lambda t: ["v0.4.0", "v0.5.0"])
+    check("上游就是自己这版 → 不提示更新",
+          st["checked"] is True and st["has_update"] is False, str(st))
+    st = vc.check("0.5.0", fetcher=lambda t: ["v0.4.0", "v0.5.1"])
+    check("上游更新 → has_update", st["has_update"] is True, str(st))
+    check("latest 不带 v 前缀（带了会印成 vv0.5.1）",
+          st["latest"] == "0.5.1", str(st["latest"]))
+    check("提示文案里只有一个 v",
+          "vv" not in vc.message(st), vc.message(st))
+
+    # ---------- 接进 App：status 里有、日志里会提醒 ----------
+    tmp_dir = Path(_tempfile.mkdtemp(prefix="songboard-upd-"))
+    real_fetch = vc.fetch_tags
+    try:
+        def write_cfg(**upd):
+            p = tmp_dir / "config.json"
+            p.write_text(_json.dumps({
+                "mode": "demo", "room_id": 0,
+                "netease": {"enabled": False},
+                "ncm_bridge": {"enabled": False},
+                # interval_hours=0 → 只查一次就返回，不然测试会真的睡 6 小时
+                "update_check": {"enabled": True, "interval_hours": 0,
+                                 "timeout": 0.1, **upd},
+            }, ensure_ascii=False), encoding="utf-8")
+            return p
+
+        app = App(Config.load(write_cfg()), persist=False)
+        v = app.status().get("version") or {}
+        check("status() 里带 version（控制台要靠它显示）",
+              isinstance(v, dict) and v, str(v))
+        check("没查之前是 checked=False（不能默认说「已是最新」）",
+              v.get("checked") is False and v.get("has_update") is False, str(v))
+        check("version.current 就是当前版本号",
+              v.get("current") == __version__, str(v.get("current")))
+
+        vc.fetch_tags = lambda timeout=5.0: ["v0.1.0", "v9.9.9", "latest"]
+        try:
+            _aio.run(app._check_update())
+        finally:
+            vc.fetch_tags = real_fetch
+        v = app.version_state
+        check("后台任务查到新版 → has_update", v.get("has_update") is True, str(v))
+        check("日志里提醒了有新版本",
+              any("有新版本" in x.get("text", "") for x in app.log_lines),
+              str([x.get("text") for x in app.log_lines][-1:]))
+        check("日志文案没有 vv", not any("vv" in x.get("text", "")
+                                         for x in app.log_lines))
+
+        # 关掉之后一次网络请求都不该发。
+        # ⚠️ 顺便压一个真踩到的坑：这行 App(...) 是在上面 _aio.run() 跑完之后
+        #    同步构造的 —— Python 3.12 里 asyncio.run 结束会把 current loop
+        #    清成 None，此时用 asyncio.get_event_loop() 会直接抛 RuntimeError。
+        app2 = None
+        make_err = ""
+        try:
+            app2 = App(Config.load(write_cfg(enabled=False)), persist=False)
+        except Exception as exc:  # noqa: BLE001
+            make_err = repr(exc)
+        check("asyncio.run() 跑过之后仍能构造 App（3.12 的 get_event_loop 会抛）",
+              app2 is not None, make_err)
+        if app2 is not None:
+            calls: list[int] = []
+            vc.fetch_tags = lambda timeout=5.0: (calls.append(1), ["v9.9.9"])[1]
+            try:
+                _aio.run(app2._check_update())
+            finally:
+                vc.fetch_tags = real_fetch
+            check("update_check.enabled=false 时一次都不查", not calls,
+                  f"发了 {len(calls)} 次请求")
+            check("关掉时 status 里仍是「没查过」，不会显示报错",
+                  app2.status()["version"]["error"] is None,
+                  str(app2.status()["version"]))
+
+        # ---------- 控制台页面 ----------
+        page = (Path(__file__).resolve().parent / "web" / "control.html"
+                ).read_text(encoding="utf-8")
+        for need in ("updateBar", "verTag", "renderVersion", "btnUpdateHide"):
+            check(f"控制台有 {need}", need in page, "" if need in page else "缺失")
+        check("控制台区分「查不到」和「已是最新」（看的是 checked）",
+              "v.checked" in page, "" if "v.checked" in page else "没判断 checked")
+        ids = set(_re.findall(r'id="([A-Za-z0-9_]+)"', page))
+        used = set(_re.findall(r"\$\('#([A-Za-z0-9_]+)'\)", page))
+        check("控制台 JS 引用的 id 全都存在（否则取到 null 整块 JS 崩）",
+              not (used - ids), str(sorted(used - ids)))
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp_dir, ignore_errors=True)
+
+
 def test_changelog() -> None:
     """版本号必须和 CHANGELOG 对得上。
 
@@ -2788,6 +2940,7 @@ def main() -> int:
     test_web_js()
     test_bat_files()
     test_ps1_files()
+    test_version_check()
     test_room_diagnostics()
     test_cookie_extract()
     test_qrlogin()

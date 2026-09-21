@@ -27,6 +27,9 @@ from .media import MediaInfo, played_track_ids, read_now_playing, similarity
 from .ncmbridge import NeteaseBridge
 from .netease import NeteaseAuthError, build_driver, search_song
 from .store import QueueStore
+from .version_check import check as check_update
+from .version_check import initial as update_initial
+from .version_check import message as update_message
 from .webui import BoardServer
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -56,7 +59,16 @@ HELP = """
 class App:
     def __init__(self, cfg: Config, *, persist: bool = True) -> None:
         self.cfg = cfg
-        self.loop = asyncio.get_event_loop()
+        # ⚠️ 别用 asyncio.get_event_loop()：Python 3.12 上，如果这个线程以前跑过
+        #    asyncio.run()（跑完会把 current loop 清成 None），它会直接抛
+        #    RuntimeError: There is no current event loop in thread 'MainThread'。
+        #    自检和几个 demo 脚本都这么用（先 asyncio.run 跑一段，再同步构造 App），
+        #    实测踩到了。有运行中的循环就用它，没有就自己起一个。
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
         self.parser = CommandParser(cfg)
         self.store = QueueStore(cfg, DATA_DIR, persist=persist)
         if persist:
@@ -117,12 +129,20 @@ class App:
         self._track_task: asyncio.Task | None = None
         #: 启动时验一次网易云登录态（见 _check_netease_login）
         self._login_task: asyncio.Task | None = None
+        #: 启动时查一次有没有新版本（见 _check_update）。status() 只读这份缓存，
+        #: 所以查更新永远不会拖慢每 2 秒一次的状态轮询。
+        self.version_state: dict[str, Any] = update_initial(__version__)
+        self._update_task: asyncio.Task | None = None
 
     # ---------- 日志与广播 ----------
     def log(self, text: str) -> None:
         entry = {"ts": time.time(), "text": text}
         self.log_lines.append(entry)
-        print(f"[songboard] {text}")
+        # ⚠️ flush=True 是必须的：stdout 接的是管道/重定向时是**块缓冲**，
+        #    不 flush 的话日志会卡在缓冲区里，等下一次 input() 才吐出来
+        #    （实测：启动后 1 秒就该出现的"版本检查"要等主播按一次回车才显示，
+        #    看起来就像这条检查根本没跑）。
+        print(f"[songboard] {text}", flush=True)
         if self.server:
             self.server.broadcast({"event": "log", "log": entry})
 
@@ -1179,10 +1199,17 @@ class App:
         st["ncm_bridge"] = self.bridge.status()
         st["room_id"] = self.cfg.get("room_id", 0)
         st["media"] = self.media_status()
+        # 版本/更新状态：只回读缓存（真正的网络请求在 _check_update 里）
+        st["version"] = self.version_state
         return st
 
     # ---------- 启停 ----------
     async def run(self, *, open_browser: bool = False) -> None:
+        # 以**真正在跑**的这个循环为准：脚本可能是先同步 new 出 App、
+        # 再 asyncio.run(app.run())，那样构造时的循环和现在跑的不是同一个，
+        # self.loop.create_task(...) 就会把任务挂到一个永远不会执行的循环上
+        # —— 表现是"任务静默不跑"，极难查。这里对齐一次，从根上消掉。
+        self.loop = asyncio.get_running_loop()
         ctx: dict[str, Any] = {
             "loop": self.loop,
             "store": self.store,
@@ -1237,6 +1264,9 @@ class App:
         # 早点告诉主播，别等他点了歌才发现"搜不到"（而且以前会误报成
         # "网易云搜不到《X》"，让人以为是歌名写错了）。
         self._login_task = asyncio.create_task(self._check_netease_login())
+        # 查有没有新版本。**故意放在最后、而且是独立任务**：断网时 urllib
+        # 会一直等到超时（默认 5 秒），塞进启动流程会让"已启动"晚出来 5 秒。
+        self._update_task = asyncio.create_task(self._check_update())
         if open_browser:
             webbrowser.open(f"{base}/control")
 
@@ -1256,6 +1286,29 @@ class App:
             self.log(f"⚠️ 网易云登录态检查失败：{exc!r}")
             return
         self.log(("网易云搜索：" if ok else "⚠️ 网易云搜索不可用：") + msg)
+
+    async def _check_update(self) -> None:
+        """查一次有没有新版本，把结果记进 self.version_state 供控制台显示。
+
+        为什么单独一个任务、还用 to_thread：
+            urlopen 是**同步阻塞**的。直接在事件循环里调，断网时整个点歌板
+            会僵住 5 秒（连弹幕都不处理）—— 查更新不配这个代价。
+
+        为什么查不到不出声：断网、GitHub 被限流都是常态，
+        查不到就当"不知道"，不要拿一个无关紧要的检查去吓主播。
+        """
+        if not self.cfg.get("update_check.enabled", True):
+            return
+        timeout = float(self.cfg.get("update_check.timeout", 5.0) or 5.0)
+        hours = float(self.cfg.get("update_check.interval_hours", 6) or 0)
+        while True:
+            self.version_state = await asyncio.to_thread(
+                check_update, __version__, timeout)
+            if self.version_state.get("checked"):
+                self.log(update_message(self.version_state))
+            if hours <= 0:
+                return
+            await asyncio.sleep(hours * 3600)
 
     async def _status_loop(self) -> None:
         while True:

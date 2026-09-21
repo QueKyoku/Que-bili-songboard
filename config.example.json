@@ -95,6 +95,11 @@
     "fallback_to_board": true,
     "strict_match": true
   },
+  "update_check": {
+    "enabled": true,
+    "interval_hours": 6,
+    "timeout": 5.0
+  },
   "gift_gate": {
     "enabled": false,
     "mode": "min_total",
