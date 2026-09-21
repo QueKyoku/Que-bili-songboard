@@ -74,12 +74,14 @@ exit /b 1
 echo   [1] 演示模式（离线看效果；会自己造模拟弹幕，正式开播别用）
 echo   [2] 连直播间（需要填房间号）
 echo   [3] 自检（离线测试，验证代码没坏）
+echo   [4] 扫码登录网易云（设置 cookie，不用手抄）
 echo.
-set /p choice=请选择 [1/2/3]:
+set /p choice=请选择 [1/2/3/4]:
 
 if "%choice%"=="1" goto demo
 if "%choice%"=="2" goto live
 if "%choice%"=="3" goto test
+if "%choice%"=="4" goto qrlogin
 goto demo
 
 :demo
@@ -100,6 +102,11 @@ goto end
 echo.
 python selftest.py
 pause
+goto end
+
+:qrlogin
+rem 转给专门的扫码脚本：它会检查 Python / tkinter / qrcode 并自动补上
+call "%~dp0扫码登录.bat"
 goto end
 
 :end

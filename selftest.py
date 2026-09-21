@@ -910,8 +910,19 @@ def test_bat_files() -> None:
         # 菜单里的中文要能读出来（防止整个文件被写坏）
         if bat.name == "启动.bat":
             for key in ("哔哩哔哩点歌板", "[1] 演示模式", "[2] 连直播间",
-                        "[3] 自检"):
+                        "[3] 自检", "[4] 扫码登录"):
                 check(f"启动.bat 里有「{key}」", key in text)
+
+        # 扫码登录的入口必须是 .bat：没装 Python 时 .pyw 双击根本不执行，
+        # 所以"检查环境"这一步只能放在不需要 Python 的批处理里。
+        if bat.name == "扫码登录.bat":
+            for key, why in (("where python", "检查有没有 Python"),
+                             ("import tkinter", "检查有没有图形界面库"),
+                             ("import qrcode", "检查二维码库"),
+                             ("pip install", "缺依赖时自动装"),
+                             ("python.org", "没 Python 时给下载地址"),
+                             ("build_gui.ps1", "给出「用 exe」这条备选路")):
+                check(f"扫码登录.bat 会{why}", key in text)
 
 
 def test_netease_auth_codes() -> None:
