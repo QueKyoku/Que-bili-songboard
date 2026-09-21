@@ -36,7 +36,6 @@ FILES = [
     'proc_check.py',
     'e2e_check.py',
     'check_integration.py',
-    'check_state.py',
     'diag_room.py',
     'set_cookie.py',
     'demo_full.py',
@@ -44,10 +43,11 @@ FILES = [
     'demo_flow.py',
     'demo_five.py',
     'demo_manual.py',
-    '__netwatch.py',
-    '__selftest_config.json',
+    'demo_gift.py',
+    'CHANGELOG.md',
     '启动.bat',
     '启动外部媒体源.bat',
+    '扫码登录.bat',
 ]
 
 # ── 永远排除（双保险，即使白名单里带了目录）
@@ -95,6 +95,23 @@ for d in DIRS:
     for p in sorted(base.rglob('*')):
         if p.is_file():
             take(p, p.relative_to(ROOT).as_posix())
+
+# ── 漏网检查：根目录的脚本/文档有没有没列进白名单的？
+# 加这一段是因为白名单**已经过时过一次**了：0.2~0.4 期间新增的
+# demo_gift.py、CHANGELOG.md、扫码登录.bat 都没被加进来，
+# 打包上传时会**静默漏掉**（不报错，就是少文件，很难发现）。
+_ALLOW_PRIVATE = True
+root_files = []
+for pat in ('*.py', '*.bat', '*.md', '*.pyw'):
+    root_files += [f.name for f in ROOT.glob(pat)]
+unlisted = sorted(n for n in root_files
+                  if n not in FILES and not n.startswith('_')
+                  and n not in {'config.json'})
+if unlisted:
+    print("  !! 根目录这些文件没在白名单里，会被漏掉（确认下该不该传）：")
+    for n in unlisted:
+        print(f"       {n}")
+    print()
 
 for f in FILES:
     p = ROOT / f

@@ -8,6 +8,43 @@
 > ⚠️ 本项目依赖 B 站弹幕长连接和网易云的**非官方接口**，
 > 接口一改就可能失效。补丁版本里也可能会出现"适应上游变更"的修复。
 
+## [0.4.3] - 2026-09-20
+
+这一版是**整体复查**的产物：自检一直是全绿的，但把项目从头捋了一遍，
+还是揪出几个"测试抓不到"的毛病。
+
+### 修复
+
+- **`tools/login_qrcode.py` 每次运行都报 `SyntaxWarning`**：
+  docstring 里写了 `python tools\login_qrcode.py`，而 `\l` 是无效转义。
+  是 0.4.2 移动文件时我引入的，改成正斜杠。
+- **删掉 `check_state.py`**：这个脚本是查「你歌单里有哪些测试期加的歌」的，
+  而项目**早就不写歌单了**（0.1.0 起就只插播放队列）—— 留着纯属误导，
+  跑一下还会让人以为程序在动歌单。
+- **`__netwatch.py` → `tools/netwatch.py`**：它是开发期研究网易云接口用的
+  调试脚本（用 CDP 抓客户端的 API 调用），不该占着根目录，
+  更不该用双下划线当"临时文件"命名 —— 看着像垃圾，其实是工具。
+
+### 新增
+
+- **`tools/check_project.py`：项目体检。** 自检管"功能对不对"，
+  它管"项目有没有烂"：编译告警、README 引用的文件是否存在、
+  临时文件/构建产物/凭据残留、版本号三处是否一致、有没有硬编码路径、
+  git 工作区是否干净。上面那几条问题就是它抓出来的。
+- **`tools/make_upload.py` 加了漏网检查。** 它的白名单**已经过时过一次**：
+  0.2~0.4 期间新增的 `CHANGELOG.md`、`demo_gift.py`、`扫码登录.bat`
+  都没被列进去 —— 而它用的是白名单机制，**漏了不会报错，只会静默少文件**。
+  现在根目录冒出没列入白名单的脚本会当场提醒。
+
+### 变更
+
+- `tools/make_upload.py` 的白名单：补上缺的三个文件，去掉过时的
+  （`check_state.py`、`__netwatch.py`）和**根本就不该上传的**
+  `__selftest_config.json`（selftest 的工作文件，临时产物）。
+  重新验证：59 个文件、关键文件一个不缺、不含 `config.json` / exe / dll。
+- README 补了三个工具（`check_project.py`、`netwatch.py`、`make_upload.py`），
+  修了两处只写文件名没写目录的地方（`overlay.html`、`build_bridge.ps1`）。
+
 ## [0.4.2] - 2026-09-20
 
 ### 变更
@@ -360,6 +397,7 @@
 - 网易云的接口是非官方的，可能随官方改动失效。
 - 桥需要每次重新注入（网易云一重启就失效）。
 
+[0.4.3]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.3.0...v0.4.0

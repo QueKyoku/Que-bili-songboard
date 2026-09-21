@@ -8,7 +8,7 @@
 git clone https://github.com/QueKyoku/Que-bili-songboard.git
 ```
 
-当前版本 **v0.4.2** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
+当前版本 **v0.4.3** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
 `python -m songboard --version` 可以直接问程序自己
 
 给 B 站主播用的点歌工具。观众发一条 `点歌 稻香`，程序就会把这首歌加到网易云的
@@ -808,6 +808,7 @@ python e2e_check.py http://127.0.0.1:8765
 
 | 工具 | 用途 |
 |---|---|
+| `python tools/check_project.py` | **项目体检**：文档/版本/残留/凭据/白名单有没有毛病 |
 | `python tools/check_gui.py` | 检查扫码登录窗口能不能起来、二维码画没画出来 |
 | `python tools/check_overlay_dom.py --control` | 用无头 Edge/Chrome 真跑一遍叠加层和控制台（见下） |
 | `python diag_room.py <房间号> [秒数]` | 直连弹幕服务器，打印收到的每一个原始帧 |
@@ -822,7 +823,7 @@ python e2e_check.py http://127.0.0.1:8765
 出错（或者整段 `<script>` 因为同一作用域重复声明 `let` 被浏览器直接丢弃），
 表现是**安安静静地停在「等待点歌…」**：服务端一切正常、日志一句不报。
 
-这个坑真的踩过：`overlay.html` 里 `let lastKey` 被写了两遍，
+这个坑真的踩过：`web/overlay.html` 里 `let lastKey` 被写了两遍，
 浏览器把整段脚本丢了，叠加层完全不刷新。
 
 所以有个用无头浏览器真跑的检查：
@@ -1060,6 +1061,9 @@ tools/
   check_overlay_dom.py     无头浏览器真跑叠加层/控制台
   扫码登录.pyw             扫码登录的图形界面本体（由根目录的 .bat 拉起）
   login_qrcode.py          扫码登录的命令行版（终端里画二维码）
+  check_project.py         项目体检（文档/版本/残留/凭据一致性）
+  netwatch.py              调试用：用 CDP 抓网易云客户端的 API 调用
+  make_upload.py           按白名单打包一份干净副本 + zip（上传用）
   check_gui.py             检查扫码登录窗口能不能起来
   build_gui.ps1            把扫码登录的图形界面打包成单个 exe
   playercap/               可选的外部媒体信息源（exe 未入库）
@@ -1111,7 +1115,7 @@ powershell -File tools\build_bridge.ps1 `
   -BridgeSource ..\awoo-connectors\native\Netease\AwooNcmCefBridge.cpp
 ```
 
-`build_bridge.ps1` 支持 `-BridgeSource` 指定任意路径，不必用仓库里这份拷贝。
+`tools/build_bridge.ps1` 支持 `-BridgeSource` 指定任意路径，不必用仓库里这份拷贝。
 
 ### 本项目原创的部分
 
