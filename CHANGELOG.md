@@ -8,6 +8,64 @@
 > ⚠️ 本项目依赖 B 站弹幕长连接和网易云的**非官方接口**，
 > 接口一改就可能失效。补丁版本里也可能会出现"适应上游变更"的修复。
 
+## [0.5.0] - 2026-09-20
+
+### 新增
+
+- **`tools/setup_env.ps1`：给「完全干净的电脑」自动配好环境。**
+  之前只能提示"你去官网装个 Python"，那不叫自动配置环境。
+  现在两个 `.bat` 发现没装 Python 会**问你要不要自动装**，选是就跑这套：
+  - **多镜像下载**（按实测速度排序：华为云 → npmmirror → 阿里云 → 官方）
+  - **下载后校验**：文件大小、PE 文件头（`MZ`）、
+    **数字签名是不是 Python Software Foundation**
+  - **静默安装到用户目录**（`InstallAllUsers=0` → 不需要管理员权限、不弹 UAC，
+    这点对主播电脑很重要）
+  - **依赖也用多镜像装**（阿里云 → 清华 → 腾讯 → 官方 PyPI）
+  - 不想自动装就走手动引导；自动装失败也回落到手动引导
+
+### 说明
+
+- **安装包不放进项目里**，也不单独开一个项目 —— 按需下载。
+  理由：26MB 会让每次 `git clone` 都变慢，而且 Python 版本会过期；
+  何况"装环境"本来就要联网（还得 pip 装依赖）。
+- **下载源是量过的，不是拍脑袋**。同一台机器下 26MB：
+
+  | 源 | 耗时 |
+  | --- | --- |
+  | 华为云 | **2.5 秒** |
+  | npmmirror | ~11 秒 |
+  | 阿里云 | ~5 分钟 |
+  | 官方 python.org | ~6 分钟 |
+
+  差 50 倍。另外发现 **HEAD 快不代表下载快**：阿里云 HEAD 只要 0.11 秒，
+  真下整包 5 分钟 —— 所以判断可用性不能只看握手。
+- **签名校验有个坑**：Python 3.12.10 的签名证书 **2025-04-11 就过期了**，
+  `Get-AuthenticodeSignature` 返回 `Status=Valid`（签名本身没问题），
+  但 `SignerCertificate.Verify()` 是 `False`。要是按"证书链必须有效"来校验，
+  会把完全合法的官方安装包拒掉。所以判据是
+  **Status 为 Valid 且签名者写着 Python Software Foundation**。
+- ⚠️ **安装那一步我没能在本机实测**（本机已经装了同一个版本的 Python，
+  再装会冲突、污染环境）。**下载 + 校验**那段是完整实测过的
+  （`-DryRun -Force` 走完整流程，华为云 2.5 秒下完，三项校验全过）。
+
+### 修复
+
+- **`tools/gsm_probe.ps1` 含中文却没有 UTF-8 BOM** —— PowerShell 5.1 会按
+  GBK 读，中文全乱、语法都过不了。
+- **`tools/setup_env.ps1` 里两处 PowerShell 7 才支持的写法**（`$x = if (...) {...}
+  else {...}`、括号里塞分号），PS 5.1 直接语法错误。
+- **`$args` 是 PowerShell 的自动变量**，不能拿来存安装参数（会被忽略）。
+- **`setup_env.ps1` 写出来时是 LF 换行**，统一成 CRLF。
+  （仓库的 `.gitattributes` 已经给 `*.ps1` / `*.bat` 钉死 `eol=crlf`，
+  所以自己 clone 或者下 zip 拿到的本来就是对的，不用自己转。）
+
+### 新增（检查）
+
+- `selftest.py` 加了 `test_ps1_files`：`.ps1` 含中文**必须有 UTF-8 BOM**。
+  这个坑踩过两次（`build_bridge.ps1`、`setup_env.ps1`），而且
+  **每次用编辑器改完 `.ps1`，BOM 都会丢** —— 所以必须有检查盯着。
+- `tools/check_project.py` 同步加了这条。
+
 ## [0.4.4] - 2026-09-20
 
 ### 修复
@@ -421,6 +479,7 @@
 - 网易云的接口是非官方的，可能随官方改动失效。
 - 桥需要每次重新注入（网易云一重启就失效）。
 
+[0.5.0]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.1...v0.4.2

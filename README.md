@@ -8,7 +8,7 @@
 git clone https://github.com/QueKyoku/Que-bili-songboard.git
 ```
 
-当前版本 **v0.4.4** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
+当前版本 **v0.5.0** · 更新日志见 [`CHANGELOG.md`](CHANGELOG.md) ·
 `python -m songboard --version` 可以直接问程序自己
 
 给 B 站主播用的点歌工具。观众发一条 `点歌 稻香`，程序就会把这首歌加到网易云的
@@ -75,11 +75,36 @@ git clone https://github.com/QueKyoku/Que-bili-songboard.git
 pip install websockets cryptography
 ```
 
-> **双击 `启动.bat` 的话不用自己装**：它会先检查 Python 和依赖 ——
-> 缺依赖自动装，装不上会告诉你要手动敲哪一条；Python 没装或版本太旧也会
-> 给出明确指引，而不是甩一段 `ModuleNotFoundError` 让人猜。
+> **什么都不用自己装：双击 `启动.bat` 就行。** 它会按这个顺序自己处理：
+>
+> | 情况 | 它会怎么办 |
+> | --- | --- |
+> | 没装 Python | **问你要不要自动装**。选是 → 从国内镜像下载（实测华为云 **2.5 秒** / 26MB）、校验数字签名、静默装到你的用户目录（**不用管理员权限**） |
+> | Python 低于 3.10 | 报出当前版本，让你升级 |
+> | 缺依赖 | 自动 `pip install`，pip 源也是多镜像 |
+> | 一切正常 | 直接进菜单 |
+>
+> 不想自动装的话它会走手动引导：给出官网链接（提醒勾 *Add python.exe to PATH*），
+> 以及另一条路 —— 直接用打包好的 exe（**那东西连 Python 都不需要**）。
+>
 > （这个坑真踩过：从 GitHub 下载 zip 解压、双击启动、选完房间号，
 > 直接 `ModuleNotFoundError: No module named 'websockets'` 然后"已退出"。）
+
+**关于下载源**（实测数据，不是拍脑袋选的）：
+
+| 源 | 下 26MB 要多久 |
+| --- | --- |
+| 华为云 | **2.5 秒** |
+| npmmirror（淘宝） | ~11 秒 |
+| 阿里云 | ~5 分钟 |
+| 官方 python.org | ~6 分钟 |
+
+差了 **50 倍** —— 所以脚本按"华为云 → npmmirror → 阿里云 → 官方"的顺序试，
+一个不行自动换下一个。pip 依赖同理（阿里云/清华/腾讯/官方）。
+
+> ⚠️ 从第三方镜像下载可执行文件，**必须校验签名**。
+> 脚本会检查大小、PE 文件头，以及**数字签名是不是 Python Software Foundation**，
+> 不对就直接删掉不装。
 
 ### 跑起来
 
@@ -808,6 +833,7 @@ python e2e_check.py http://127.0.0.1:8765
 
 | 工具 | 用途 |
 |---|---|
+| `tools\setup_env.ps1` | **给干净电脑配环境**：多镜像下载 Python + 校验签名 + 静默安装 + 装依赖 |
 | `python tools/check_project.py` | **项目体检**：文档/版本/残留/凭据/白名单有没有毛病 |
 | `python tools/check_gui.py` | 检查扫码登录窗口能不能起来、二维码画没画出来 |
 | `python tools/check_overlay_dom.py --control` | 用无头 Edge/Chrome 真跑一遍叠加层和控制台（见下） |
@@ -1065,6 +1091,7 @@ tools/
   netwatch.py              调试用：用 CDP 抓网易云客户端的 API 调用
   make_upload.py           按白名单打包一份干净副本 + zip（上传用）
   check_gui.py             检查扫码登录窗口能不能起来
+  setup_env.ps1            ★ 给干净电脑自动装 Python + 依赖（多镜像）
   build_gui.ps1            把扫码登录的图形界面打包成单个 exe
   playercap/               可选的外部媒体信息源（exe 未入库）
 

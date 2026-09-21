@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+BOM_PS1 = b"\xef\xbb\xbf"      # UTF-8 BOM：PowerShell 5.1 认它
 problems: list[str] = []
 notes: list[str] = []
 
@@ -173,6 +174,24 @@ if ver == cl_ver == rm_ver:
     ok(f"三处一致：{ver}")
 else:
     bad(f"版本号不一致：代码={ver} 日志={cl_ver} README={rm_ver}")
+
+
+# ─────────────── 5.5 PowerShell 脚本 ───────────────
+print("\n=== 5.5 PowerShell 脚本编码 ===")
+# 两个都是实测踩过的：
+#   · 没 BOM → PowerShell 5.1 按 GBK 读，带中文的脚本整段乱码、语法都不过
+#   · 每次用编辑器改完 .ps1，BOM 都会丢，所以必须有人盯着
+ps1_bad = []
+for p in sorted((ROOT / "tools").glob("*.ps1")):
+    raw = p.read_bytes()
+    txt = raw.decode("utf-8", "replace")
+    has_cn = any("\u4e00" <= c <= "\u9fff" for c in txt)
+    if has_cn and not raw.startswith(BOM_PS1):
+        ps1_bad.append(f"{p.name}(缺 BOM)")
+if ps1_bad:
+    bad("这些 .ps1 有问题：" + ", ".join(ps1_bad))
+else:
+    ok("tools/*.ps1 的 BOM 都对")
 
 
 # ─────────────── 6. 硬编码路径 ───────────────

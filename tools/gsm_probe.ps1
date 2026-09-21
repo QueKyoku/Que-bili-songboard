@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 # 读取 Windows 系统媒体会话（GSMTC），输出固定格式给 Python 解析。
 #
 # 输出格式（每个会话三行）：

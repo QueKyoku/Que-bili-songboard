@@ -53,16 +53,36 @@ pause
 exit /b 1
 
 :nopython
-echo   [x] 没找到 python 命令。
+echo   [x] 这台电脑上没找到 python 命令。
 echo.
-echo       请先安装 Python 3.10 或更新版本，安装时记得勾选
-echo       "Add python.exe to PATH"，装完重开一个窗口再运行本文件。
+echo   可以现在自动装一个：从国内镜像下载约 26MB，装到你的用户目录，
+echo   不需要管理员权限，也不影响系统里别的东西。
 echo.
-echo       下载地址：https://www.python.org/downloads/
+set /p autoinstall=现在自动装吗 [Y/n]:
+if /i "%autoinstall%"=="n" goto nopython_manual
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\setup_env.ps1"
+if errorlevel 1 goto nopython_manual
+echo.
+echo   装完了。**请关掉这个窗口，重新双击一次**（新装的 PATH 要新窗口才生效）。
+echo.
+pause
+exit /b 0
+
+:nopython_manual
+echo   那就手动装吧，两条路：
+echo.
+echo   1) 装一个 Python 3.10 或更新版本
+echo      下载： https://www.python.org/downloads/
+echo      **安装时务必勾选 "Add python.exe to PATH"**，装完重开窗口再试。
+echo.
+echo   2) 直接用打包好的 exe（不需要装 Python）
+echo      在项目目录里执行一次：
+echo          powershell -ExecutionPolicy Bypass -File tools\build_gui.ps1
+echo      把 dist\网易云扫码登录.exe 放到项目根目录，双击它就行。
 echo.
 pause
 exit /b 1
-
 :oldpython
 echo   [x] Python 版本太旧，本项目需要 3.10 或更新版本。当前版本：
 python -V

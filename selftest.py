@@ -1291,6 +1291,31 @@ def test_qrlogin() -> None:
         print("  [SKIP] 没装 qrcode，跳过二维码矩阵检查")
 
 
+def test_ps1_files() -> None:
+    """PowerShell 脚本：带中文就必须有 UTF-8 BOM。
+
+    ⚠️ PowerShell 5.1（Windows 自带那个）读 .ps1 时，**没有 BOM 就按系统
+    代码页（GBK）解析** —— 带中文的脚本会整段变乱码，连语法都过不了。
+    这个坑踩过两次：build_bridge.ps1 一次，setup_env.ps1 一次。
+    而且**每次用编辑器改完 .ps1，BOM 都会丢**，所以必须有检查盯着。
+    """
+    print("\n== PowerShell 脚本编码 ==")
+    BOM = b"\xef\xbb\xbf"
+    scripts = sorted((Path(__file__).resolve().parent / "tools").glob("*.ps1"))
+    check(f"找到 {len(scripts)} 个 .ps1", bool(scripts))
+    for p in scripts:
+        raw = p.read_bytes()
+        text = raw.decode("utf-8", "replace")
+        has_cn = any("\u4e00" <= ch <= "\u9fff" for ch in text)
+        problems = []
+        if has_cn and not raw.startswith(BOM):
+            problems.append("含中文却没有 UTF-8 BOM（PowerShell 5.1 会乱码）")
+        if "\r\n" not in text[:4000] and "\n" in text[:4000]:
+            problems.append("换行是 LF（该用 CRLF）")
+        check(f"{p.name} 编码正确" + ("（无中文）" if not has_cn else ""),
+              not problems, "; ".join(problems))
+
+
 def test_syntax() -> None:
     """所有源码都必须能编译、所有模块都必须能导入。
 
@@ -2762,6 +2787,7 @@ def main() -> int:
     test_syntax()
     test_web_js()
     test_bat_files()
+    test_ps1_files()
     test_room_diagnostics()
     test_cookie_extract()
     test_qrlogin()
