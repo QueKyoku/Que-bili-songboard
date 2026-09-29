@@ -81,8 +81,8 @@ async def main() -> int:
     check("能读到下一首", now is not None and bool(now.get("next_track_id")),
           f"{now.get('next_name')}" if now else "None")
     idle = now is None or not now.get("track_id")
-    print(f"  (当前 idle={idle} → 集成逻辑会走 "
-          f"{'play_if_idle' if idle else 'insert_next'} 分支)")
+    print(f"  (当前 idle={idle}；不管空闲不空闲，都只走 insert_next —— "
+          f"队列不主动起播)")
 
     print("\n== 3. 集成接线：_queue_via_bridge 真的调到桥 ==")
     calls: list[tuple[str, object]] = []

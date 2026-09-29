@@ -10,11 +10,6 @@
       "#点歌",
       "求歌"
     ],
-    "skip_keywords": [
-      "切歌",
-      "下一首",
-      "跳过"
-    ],
     "cancel_keywords": [
       "取消点歌",
       "撤销点歌"
@@ -47,14 +42,9 @@
     "fields": {}
   },
   "media": {
-    "auto_next": true,
     "watch": true,
     "poll_seconds": 2,
     "duration_fallback": 300,
-    "grace_seconds": 9,
-    "min_playing_seconds": 25,
-    "almost_done_seconds": 3,
-    "trust_browser_progress": false,
     "match_threshold": 0.5,
     "prefer_apps": [
       "msedge",
@@ -80,19 +70,15 @@
     "write_playlist": false
   },
   "queue_only": {
-    "enabled": true,
-    "play_if_idle": true
+    "enabled": true
   },
   "ncm_bridge": {
     "enabled": false,
     "insert_next": true,
-    "play_if_idle": true,
     "timeout": 3.0,
     "probe_seconds": 30
   },
   "playback": {
-    "authority": "netease",
-    "fallback_to_board": true,
     "strict_match": true
   },
   "update_check": {

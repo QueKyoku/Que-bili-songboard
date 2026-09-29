@@ -40,7 +40,6 @@ DATA_DIR = ROOT / "data"
 HELP = """
 可用指令：
   回车            查看状态
-  n / next        下一首（切歌）
   a 歌名          手动加入队列         例：a 起风了
   r 序号          移除队列里第 N 首
   top 序号        把第 N 首置顶
@@ -54,6 +53,8 @@ HELP = """
   gift list       看谁送了多少、谁有资格
   h / help        显示本帮助
   q / quit        退出
+
+（没有"切歌"指令：队列只负责把歌插到「下一首」，播放控制归播放器）
 """
 
 
@@ -136,6 +137,9 @@ class App:
         self._update_task: asyncio.Task | None = None
         #: 桥不可用的警告是否已经写过一次（避免观众每点一首就刷一条同样的报错）
         self._bridge_warned = False
+        #: 播放器在放、但**不在点歌队列里**的曲目（主播自己的歌单之类）。
+        #: 播放状态以播放器为准，所以这个也要显示 —— 见 _align_to_netease。
+        self.external: dict[str, Any] | None = None
         #: 控制台点「重新注入桥」的进行状态。注入要等十几秒（写内存 + 远程线程
         #: + 等管道握手），不能卡住页面，所以放后台任务，状态从 status 里取。
         self.bridge_state: dict[str, Any] = {"busy": False, "ok": None,
@@ -356,22 +360,10 @@ class App:
 
                 sid = int(head.netease_id)
 
-                # 队列空着（没在放歌）→ 直接起播第一首
-                if bool(self.cfg.get("queue_only.play_if_idle", True)):
-                    state = await asyncio.to_thread(self.bridge.now_playing)
-                    if state is None or not state.get("track_id"):
-                        ok, msg = await asyncio.to_thread(
-                            self.bridge.play_now, sid)
-                        if ok:
-                            self._queue_inserted.add(head.id)
-                            # 已在播放 = 立刻开始播，占位直接解除
-                            self._queue_playing_id = head.id
-                            self.log(f"▶️ 队列空着，直接播放"
-                                     f"《{head.song}》（{head.user} 点）")
-                        else:
-                            self.log(f"⚠️ 播放《{head.song}》失败：{msg}")
-                        return
-
+                # 只插"下一首"，**绝不主动起播**（队列空着时也不）。
+                # 网易云没在放歌时插进去就是排队等着，"按不按播放"是主播的事 ——
+                # 程序一旦 play_now，就等于替主播决定了现在放什么，
+                # 和"播放状态以播放器为准"直接冲突。
                 # 保证队头是"下一首"（已经在就不重复插）
                 ok, msg, action = await asyncio.to_thread(
                     self.bridge.ensure_next, sid)
@@ -660,19 +652,7 @@ class App:
                 return
             self._bridge_warned = False
 
-            # 先看网易云到底在不在放歌
-            state = await asyncio.to_thread(self.bridge.now_playing)
-            idle = state is None or not state.get("track_id")
-
-            if idle and bool(self.cfg.get("ncm_bridge.play_if_idle", True)):
-                ok, msg = await asyncio.to_thread(
-                    self.bridge.play_now, netease_id)
-                if ok:
-                    self.log(f"▶️ 播放队列桥：队列空着，直接播放《{item.song}》")
-                else:
-                    self.log(f"⚠️ 播放队列桥：{msg}")
-                return
-
+            # 只插"下一首"，不主动起播（理由同上：播放控制权归主播和网易云）
             if not bool(self.cfg.get("ncm_bridge.insert_next", True)):
                 return
             ok, msg = await asyncio.to_thread(
@@ -759,16 +739,9 @@ class App:
         if cmd.action == "none":
             return
         # 双保险：对应关键词列表为空时，该指令视为关闭
-        if cmd.action == "skip" and not self.cfg.get("danmaku.skip_keywords"):
-            return
         if cmd.action == "query" and not self.cfg.get("danmaku.query_keywords"):
             return
         if cmd.action == "cancel" and not self.cfg.get("danmaku.cancel_keywords"):
-            return
-        if cmd.action == "skip":
-            item = await self.store.next(reason="skip")
-            self.log(f"⏭ {user} 触发了切歌" + (f"，切到《{item.song}》" if item else "，队列已空"))
-            self.reply_queue.append(f"@{user} 已切歌")
             return
         if cmd.action == "query":
             n = self.store.user_waiting_count(user, uid)
@@ -856,12 +829,8 @@ class App:
           · 网易云客户端窗口标题（class=OrpheusBrowserHost）—— 只有歌名
         """
         poll = float(self.cfg.get("media.poll_seconds", 2) or 2)
-        authority = str(self.cfg.get("playback.authority", "netease") or "netease")
-        if authority == "netease":
-            self.log("播放状态以【网易云实际播放】为准：你在网易云放什么，点歌板就显示什么"
-                     "（不会自动推进队列）")
-        else:
-            self.log("自动下一首已启用：正在监视播放器（只读窗口标题/系统媒体会话）")
+        self.log("播放状态以【播放器实际播放】为准：播放器在放什么，点歌板就显示什么。"
+                 "点歌队列只负责把歌插到「下一首」，不主动切歌、也不主动起播")
         while True:
             await asyncio.sleep(poll)
             try:
@@ -883,7 +852,6 @@ class App:
         if ext is not None and ext.title:
             self._apply_media(ext)
             await self._align_to_netease(ext)
-            await self._maybe_auto_advance()
             return
 
         # 2) 回退：窗口标题（歌名）+ 系统媒体会话（进度）
@@ -894,7 +862,6 @@ class App:
             return
         self._apply_media(title_info)
         await self._align_to_netease(title_info)
-        await self._maybe_auto_advance()
 
     def _apply_media(self, info: MediaInfo) -> None:
         """记录当前曲目；只有"换歌了"才触发换歌处理。"""
@@ -906,22 +873,28 @@ class App:
             self._media_since = time.time()
 
     async def _align_to_netease(self, info: MediaInfo) -> None:
-        """把点歌板的"正在播放"对齐到网易云实际播放。
+        """把点歌板的"正在播放"对齐到播放器实际在放的那首。
 
         ⚠️ 必须每轮都做，不能只在"换歌"时做：
         网易云一直在放同一首歌（或主播手动切到队列里的另一首）时，
         没有"变化事件"，只靠事件驱动的话点歌板会一直停在旧状态。
         """
-        if str(self.cfg.get("playback.authority", "netease") or "netease") != "netease":
-            return
-        if not self.store.active():
-            return
         strict = bool(self.cfg.get("playback.strict_match", True))
         item, why = await self.store.set_current_by_title(
             info.title, artist=info.artist, strict=strict,
         )
         if item is None:
+            # 播放器在放**队列里没有**的歌（主播自己的歌单、随手放的歌）。
+            # "以播放器为准"就意味着这种时候也得显示播放器实际在放的那首 ——
+            # 以前是直接 return 不动，结果点歌板一直挂着上一首点歌，
+            # 看起来像"播放器没在放"或者"点歌板坏了"。
+            self.external = {
+                "song": info.title,
+                "artist": info.artist or "",
+                "source": info.source or "",
+            }
             return
+        self.external = None
         changed = self.store.current is not None and self.store.current.id == item.id
         # 只在"当前指向真的变了"时打日志，否则每 2 秒刷屏
         if changed and why != "已经是当前曲目" and why != self._last_align_msg:
@@ -929,70 +902,15 @@ class App:
             self.log(f"🎵 点歌板已对齐网易云：正在放《{info.title}》→ {why}")
 
     async def _maybe_auto_advance(self) -> None:
-        """判断要不要自动切下一首。
+        """已废弃：自动切歌整个去掉了。
 
-        ⚠️ 在 playback.authority = netease 模式下**不做任何自动切歌**：
-        既然播放状态以网易云为准，队列就该由主播手动放来推进，
-        程序只在每一轮轮询时把点歌板的显示对齐（见 _align_to_netease）。
-        否则会出现"程序以为播完了、把队列推进了，但网易云其实还在放"的错位。
+        为什么删：播放状态既然以播放器为准，队列就该由**主播在播放器里放**
+        来推进，程序只在每轮轮询时把点歌板的显示对齐（见 _align_to_netease）。
+        以前那套"猜播放器播完了 → 自己推进队列"的逻辑会出现
+        "程序以为播完了、把队列推进了，但播放器其实还在放"的错位；
+        而且它还会调 play_now，等于替主播决定现在放什么。
         """
-        if str(self.cfg.get("playback.authority", "netease") or "netease") == "netease":
-            return
-        if not self.cfg.get("media.auto_next", True):
-            return
-        if self.store.current is None:
-            return
-        fallback = float(self.cfg.get("media.duration_fallback", 300) or 300)
-        grace = float(self.cfg.get("media.grace_seconds", 9) or 9)
-        almost = float(self.cfg.get("media.almost_done_seconds", 3) or 3)
-
-        # (a) 播放器进度快到底。这里必须非常小心：
-        #     浏览器媒体会话常常没有标题，分不清是"网易云网页版"还是"B站视频"，
-        #     直接采信会导致看视频时把点歌队列切乱。所以默认只在
-        #     ①配置显式开启 trust_browser_progress，或
-        #     ②会话自带标题且与当前歌匹配 时，才采信进度。
-        cur = self.store.current
-        remaining = None
-        tl = self.timeline
-        if tl is not None and tl.has_progress and cur is not None:
-            threshold = float(self.cfg.get("media.match_threshold", 0.5) or 0.5)
-            trusted = bool(self.cfg.get("media.trust_browser_progress", False))
-            if tl.title:
-                # 进度来源自带标题：必须与当前这首匹配才采信
-                if similarity(cur.song, tl.title) >= threshold:
-                    remaining = tl.remaining
-            else:
-                # 进度来源没标题（浏览器最常见：网易云网页版和B站视频都这样）。
-                # 交叉验证：只有"正在播放的曲目来源"确认是这首时，
-                # 才把这份进度算到这首头上。否则可能是B站视频的进度。
-                music_confirmed = (
-                    self.media is not None
-                    and bool(self.media.title)
-                    and similarity(cur.song, self.media.title) >= threshold
-                )
-                if (music_confirmed or (trusted and cur.detected_title)):
-                    remaining = tl.remaining
-        reason = self.store.should_auto_advance(
-            fallback=fallback, grace=grace, remaining=remaining, almost_done=almost,
-        )
-        if not reason:
-            # (b) 播放器换了别的歌，且当前这首已经播了足够久 → 认定它播完了
-            info = self.media
-            if info is not None:
-                cur = self.store.current
-                threshold = float(self.cfg.get("media.match_threshold", 0.5) or 0.5)
-                min_play = float(self.cfg.get("media.min_playing_seconds", 25) or 25)
-                changed_away = similarity(cur.song, info.title) < threshold
-                settled = time.time() - self._media_since >= grace
-                long_enough = self.store.playing_elapsed() >= min_play
-                if changed_away and settled and long_enough:
-                    reason = "switched"
-        if reason:
-            item = await self.store.next(reason=reason)
-            if item is not None:
-                self.log(f"⏭ 自动下一首（{reason}）→ 《{item.song}》")
-            else:
-                self.log(f"⏭ 自动下一首（{reason}），队列已空")
+        return
 
     def media_status(self) -> dict[str, Any]:
         info = self.media
@@ -1013,7 +931,6 @@ class App:
                                    and similarity(cur.song, info.title) >= threshold)
                 attributed = music_confirmed or (trusted and bool(cur.detected_title))
         return {
-            "auto_next": bool(self.cfg.get("media.auto_next", True)),
             "watch": bool(self.cfg.get("media.watch", True)),
             "detected": info.to_dict() if info else None,
             "timeline": tl.to_dict() if tl else None,
@@ -1026,11 +943,6 @@ class App:
             "current_duration": (cur.duration if cur else 0.0),
         }
 
-    async def set_auto_next(self, enabled: bool) -> None:
-        self.cfg["media"]["auto_next"] = bool(enabled)
-        self.cfg.save()
-        self.log(f"自动下一首已{'开启' if enabled else '关闭'}")
-
     async def set_current_duration(self, seconds: float) -> bool:
         """手动给当前这首设定时长（读不到真实时长时用）。0 = 清除。"""
         if self.store.current is None:
@@ -1039,11 +951,11 @@ class App:
         self.log(f"当前歌曲时长设为 {seconds:.0f} 秒" if seconds else "已清除当前歌曲时长")
         return True
 
-    async def mark_current_done(self) -> dict[str, Any]:
-        """手动告诉程序"这首播完了"，立刻下一首。"""
-        item = await self.store.next(reason="manual_done")
-        self.log(f"⏭ 手动确认播完 → {'《' + item.song + '》' if item else '队列已空'}")
-        return {"ok": True, "current": item.to_dict() if item else None}
+    # ⚠️ 这里原来有 set_auto_next（自动下一首开关）和 mark_current_done
+    #    （"这首播完了"按钮）—— 都跟着自动切歌一起删了。
+    #    播放状态以播放器为准，队列怎么推进由**播放器实际放到哪首**决定
+    #    （见 _align_to_netease），所以"手动告诉程序播完了"没有意义：
+    #    播放器还在放那首，下一轮对齐就会把它拉回来。
 
     async def set_mode(self, mode: str) -> None:
         if mode == "live":
@@ -1249,6 +1161,17 @@ class App:
             except Exception as exc:  # noqa: BLE001
                 self.log(f"⚠️ 桥状态刷新失败（已忽略）：{exc!r}")
 
+    def _snapshot(self) -> dict[str, Any]:
+        """给网页的快照：队列状态 + 播放器实际在放什么 + 完整状态。
+
+        `external` 非空表示播放器在放一首**不在点歌队列里**的歌，
+        前端要显示它而不是队列里的 current（播放状态以播放器为准）。
+        """
+        snap = self.store.snapshot()
+        snap["external"] = self.external
+        snap["status"] = self.status()
+        return snap
+
     def status(self) -> dict[str, Any]:
         st = self.listener.status() if self.listener else {"mode": self._mode, "connected": False}
         st["mode"] = self._mode
@@ -1278,7 +1201,7 @@ class App:
             "loop": self.loop,
             "store": self.store,
             "config": self.cfg,
-            "snapshot": lambda: {**self.store.snapshot(), "status": self.status()},
+            "snapshot": self._snapshot,
             "status": self.status,
             "set_mode": self.set_mode,
             "set_room": self.set_room,
@@ -1286,11 +1209,9 @@ class App:
             "bridge_inject": self.bridge_inject,
             "simulate_danmaku": self.simulate_danmaku,
             "log_change": self.log,
-            "set_auto_next": self.set_auto_next,
             "set_extapi": self.set_extapi,
             "extapi_probe": self.extapi_probe,
             "set_duration": self.set_current_duration,
-            "mark_done": self.mark_current_done,
             "simulate_danmaku": self.simulate_danmaku,
             "reload_netease": self.reload_netease,
             "reload_gift_gate": self.reload_gift_gate,
@@ -1522,9 +1443,6 @@ class App:
                 break
             elif cmd in ("h", "help"):
                 print(HELP)
-            elif cmd in ("n", "next"):
-                item = await self.store.next(reason="skip")
-                print(f"  切歌：{'《' + item.song + '》' if item else '队列已空'}")
             elif cmd in ("a", "add"):
                 if arg:
                     req, result = await self.store.add(arg, "主播", source="control", force=True)

@@ -126,14 +126,11 @@
           <div class="u" id="nowTimer" style="margin-top:4px"></div>
         </div>
         <div class="row" style="margin-bottom:10px">
-          <label class="row" style="gap:6px;flex:0 0 auto">
-            <input type="checkbox" id="autoNext" /> 自动下一首
-          </label>
           <span class="tag" id="detectTag">播放器未检测到</span>
         </div>
         <div class="hint" id="detectHint" style="margin-bottom:10px">
-          自动下一首靠只读播放器状态判断：网易云客户端读窗口标题（有歌名、无进度），
-          Edge/Chrome 等读系统媒体会话（有进度）。读不到真实时长时会按配置里的兜底时长计时。
+          「正在播放」完全跟随播放器：网易云客户端读窗口标题，Edge/Chrome 等读系统媒体会话。
+          点歌队列只负责把歌插到「下一首」，<b>不主动切歌、也不主动起播</b>。
         </div>
         <div class="card" style="background:var(--panel2);padding:10px 12px">
           <h2 style="font-size:13px;margin-bottom:8px">
@@ -155,15 +152,12 @@
         </div>
         <div class="row">
           <input class="grow" id="addSong" placeholder="手动加点一首歌（回车）" />
-          <button id="btnAdd" class="primary">加进队列</button>
-          <button id="btnNext">⏭ 下一首</button>
-          <button id="btnDone">✅ 这首播完了</button>
-          <button id="btnClear" class="danger">清空队列</button>
+          <button class="primary" id="btnAdd">加进队列</button>
+          <button class="danger" id="btnClear">清空队列</button>
         </div>
-        <div class="row" style="margin-top:8px">
-          <input style="flex:0 0 130px" id="durInput" type="number" min="0" placeholder="这首多长(秒)" />
-          <button id="btnSetDur">设定时长</button>
-          <span class="muted">给当前这首一个时长，让自动切歌更准（0 = 清除）</span>
+        <div class="hint" style="margin-top:8px">
+          没有「切歌」了：队列只把歌插到播放器的「下一首」，
+          放什么、什么时候放都由你（在播放器里）决定。
         </div>
         <ul class="list" id="queueList" style="margin-top:12px"></ul>
         <div class="hint" id="queueHint"></div>
@@ -262,9 +256,10 @@
         <details>
           <summary>弹幕点歌指令</summary>
           <div class="hint">
-            <code>点歌 起风了</code> 加入队列 · <code>切歌</code> 跳过当前（默认人人可切）·
+            <code>点歌 起风了</code> 加入队列 ·
             <code>我的点歌</code> 查询自己的排队情况 · <code>取消点歌</code> 撤销自己的点歌<br/>
             去重 / 冷却 / 每人上限都能在 <code>config.json</code> 里调。
+            （没有「切歌」指令 —— 放什么由你在播放器里决定）
           </div>
         </details>
       </div>
@@ -318,26 +313,30 @@ function fmt(sec){
 function renderState(snap){  const cur = snap.current;
   const m = (snap.status && snap.status.media) || {};
   const det = m.detected || null;
-  const authority = (cfg.playback && cfg.playback.authority) || 'netease';
-  const useNetease = authority === 'netease' && det && det.title;
+  // 「正在播放」**永远**以播放器实际在放的为准（没有别的选项了）。
+  // 点歌队列只负责把歌插到"下一首"，不决定现在放什么。
+  const usePlayer = !!(det && det.title);
 
-  // 「正在播放」以谁为准由 playback.authority 决定（默认网易云）
-  if (useNetease) {
-    $('#nowSource').textContent = '正在播放（网易云）';
+  if (usePlayer) {
+    $('#nowSource').textContent = '正在播放';
     $('#nowTitle').textContent = det.title;
     $('#nowUser').textContent = det.artist ? ('艺人：' + det.artist) : '';
   } else {
-    $('#nowSource').textContent = '正在播放（点歌板队列）';
+    // 读不到播放器时的兜底：至少把队列记录的当前那首显示出来，
+    // 但文案要说清这不是"播放器确认在放的"。
+    $('#nowSource').textContent = '当前（读不到播放器，显示队列记录）';
     $('#nowTitle').textContent = cur ? cur.song : '—';
     $('#nowUser').textContent = cur ? ('点歌人 @' + cur.user + ' · ' + cur.created_at_str) : '';
   }
 
   const timer = $('#nowTimer');
-  if (useNetease) {
+  if (usePlayer) {
     const bits = det.duration > 0
       ? [`${fmt(det.position)} / ${fmt(det.duration)}`]
-      : ['网易云没给进度'];
-    if (cur && det.title && !det.title.includes(cur.song) && !cur.song.includes(det.title)) {
+      : ['播放器没给进度'];
+    if (snap.external) {
+      bits.push('这首不在点歌队列里');
+    } else if (cur && !det.title.includes(cur.song) && !cur.song.includes(det.title)) {
       bits.push(`队列待放的是《${cur.song}》`);
     } else if (!cur) {
       bits.push('点歌板队列是空的');
@@ -542,7 +541,6 @@ function renderStatus(st){
   const det = m.detected;
   const tl = m.timeline;
   const tag = $('#detectTag');
-  $('#autoNext').checked = !!m.auto_next;
   if (det && det.title) {
     tag.textContent = `${det.app} 正在放《${det.title}》` + (det.artist ? ' - ' + det.artist : '')
       + (det.duration > 0 ? ` ${fmt(det.position)}/${fmt(det.duration)}` : '（无进度）');
@@ -551,9 +549,9 @@ function renderStatus(st){
     tag.textContent = m.watch ? '未检测到播放器（打开网易云客户端放歌）' : '播放检测已关闭';
     tag.className = 'tag warn';
   }
-  // 单独显示"进度来源"，并说明它算不算当前这首——避免看 B站视频时被误导
+  // 单独显示"进度来源"，说明它算在哪首上 —— 避免看 B站视频时被误导
   const hint = $('#detectHint');
-  let h = '自动下一首靠只读播放器状态判断：网易云客户端读窗口标题（有歌名、无进度），'
+  let h = '「正在播放」只读播放器状态：网易云客户端读窗口标题（有歌名、无进度），'
         + '浏览器/系统媒体会话能提供进度但常常没有标题。';
   if (tl) {
     const who = tl.app + (tl.title ? `《${tl.title}》` : '（无标题）');
@@ -561,10 +559,9 @@ function renderStatus(st){
     if (m.timeline_attributed) {
       h += ` 当前采用进度来源：${who}${pos}（已确认算在当前这首上）。`;
     } else if (tl.title) {
-      h += ` 进度来源：${who}${pos}，但它和当前歌不匹配，不参与自动切歌。`;
+      h += ` 进度来源：${who}${pos}，但它和当前歌不匹配，只作参考。`;
     } else {
-      h += ` 检测到一份无标题进度：${who}${pos}，无法确认是音乐还是视频，`
-         + `默认不参与自动切歌（可在 config.json 打开 media.trust_browser_progress）。`;
+      h += ` 检测到一份无标题进度：${who}${pos}，无法确认是音乐还是视频，只作参考。`;
     }
   }
   hint.textContent = h;
@@ -660,21 +657,9 @@ $('#btnAdd').onclick = async () => {
   $('#addSong').value = '';
 };
 $('#addSong').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btnAdd').click(); });
-$('#btnNext').onclick = () => api('/api/next', {reason:'skip'});
-$('#btnDone').onclick = async () => {
-  const r = await api('/api/mark_done', {});
-  logLine('手动确认播完 → ' + ((r.current && r.current.song) || '队列已空'));
-};
-$('#btnSetDur').onclick = async () => {
-  const secs = parseFloat($('#durInput').value || '0');
-  const r = await api('/api/duration', {seconds: secs});
-  logLine(r.ok ? `当前歌曲时长设为 ${secs} 秒` : '现在没有正在播放的歌');
-  $('#durInput').value = '';
-};
-$('#autoNext').onchange = async (e) => {
-  await api('/api/auto_next', {enabled: e.target.checked});
-  logLine('自动下一首已' + (e.target.checked ? '开启' : '关闭'));
-};
+// 切歌 / 手动确认播完 / 自动下一首 / 设定时长 这四个按钮和开关都删了：
+// 播放状态以播放器为准，队列只负责"插下一首"，这些操作要么没用
+// （下一轮对齐就被纠正回来），要么等于替主播决定放什么。
 
 // ---- 礼物门槛 ----
 // 金额门槛实时换算成"元"，避免主播填错数量级（瓜子是千进制）

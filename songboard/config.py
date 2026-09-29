@@ -14,7 +14,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "danmaku": {
         # 点歌指令前缀，多个任选其一。{song} 是歌名占位
         "prefixes": ["点歌", "!点歌", "#点歌", "求歌"],
-        "skip_keywords": ["切歌", "下一首", "跳过"],
+        # ⚠️ 没有 skip_keywords 了：切歌功能整个去掉了
         "cancel_keywords": ["取消点歌", "撤销点歌"],
         "query_keywords": ["查询点歌", "我的点歌", "点歌查询"],
     },
@@ -50,18 +50,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "fields": {},
     },
     "media": {
-        # 自动下一首：靠"读到当前在放什么" + "播了多久"判断
-        "auto_next": True,
-        "watch": True,                  # 轮询正在播放状态（只读窗口标题/系统媒体会话）
+        # 轮询"现在在放什么"：只读信号（网易云窗口标题 / 系统媒体会话）。
+        # 用途只有一个 —— 让点歌板的"正在播放"跟着播放器走（status/叠加层显示）。
+        # ⚠️ 这里没有 auto_next 了：自动切歌整个去掉了，队列只负责"插下一首"。
+        "watch": True,
         "poll_seconds": 2,
-        "duration_fallback": 300,       # 查不到真实时长时，按这个秒数算播完（宁可长一点，别提前切）
-        "grace_seconds": 9,             # 歌名变化后等几秒再判定（过滤切歌瞬间的抖动）
-        "min_playing_seconds": 25,      # 至少播了这么久，才认可是"自然人换歌"而非自动跳过
-        "almost_done_seconds": 3,       # 播放器进度剩这么多秒就当作播完
-        # ⚠️ 浏览器会话可能没有标题，分不清"音乐页"和"B站视频页"。
-        # 开启后浏览器进度才会参与自动切歌——只在"浏览器里没有别的音频"时才安全。
-        "trust_browser_progress": False,
-        "match_threshold": 0.5,         # 歌名相似度阈值
+        "duration_fallback": 300,       # 查不到真实时长时按这个秒数估算（只影响显示）
+        "match_threshold": 0.5,         # 歌名相似度阈值：判断"播放器在放的"是不是队列里那首
         "prefer_apps": ["msedge", "chrome", "firefox", "spotify", "potplayer", "cloudmusic"],
     },
     "netease": {
@@ -113,8 +108,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # 因此只保证**队头**在"下一首"：A 在播时插 B，等 B 自然播起来再插 C。
         # 顺序永远正确，每首只插一次。
         "enabled": True,
-        # 队列空着（没在放任何歌）时，直接开始播放第一首点歌
-        "play_if_idle": True,
+        # ⚠️ 没有 play_if_idle 了：队列空着时也不主动起播 ——
+        # "按不按播放"是主播的事，程序只负责插"下一首"。
     },
     "ncm_bridge": {
         # 网易云**播放队列**桥接（可选增强）。
@@ -129,20 +124,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": False,
         # 点歌入队后，把它插到播放队列的"下一首"（当前曲目之后）
         "insert_next": True,
-        # 队列空着（没在放任何歌）时，直接开始播放第一首点歌
-        "play_if_idle": True,
+        # ⚠️ 没有 play_if_idle 了（同上：不主动起播）
         # 管道响应超时（秒）
         "timeout": 3.0,
         # 桥可用性缓存秒数（避免每轮轮询都开管道）
         "probe_seconds": 30,
     },
     "playback": {
-        # 点歌板"正在播放"以谁为准：
-        #   netease —— 以网易云实际播放状态为准（推荐，主播手动放什么就显示什么）
-        #   board   —— 以点歌板自己的队列为准
-        "authority": "netease",
-        # 网易云读不到时，回退到点歌板自己的顺序
-        "fallback_to_board": True,
+        # ⚠️ 这里原来有 authority（netease / board 二选一）和 fallback_to_board，
+        #    现在**只有一个行为**：点歌板的"正在播放"永远以播放器实际播放为准。
+        #    没有"以点歌队列为准"这个选项了 —— 队列只负责把歌插到"下一首"，
+        #    不决定现在放什么，也不主动切歌。
         # 曲名必须"严格匹配"才认可是同一首（避免翻唱误判，如 青花瓷 命中 刘芳版）
         "strict_match": True,
     },

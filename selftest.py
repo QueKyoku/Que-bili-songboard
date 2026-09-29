@@ -78,10 +78,12 @@ def test_commands() -> None:
     check("点歌：晴天 -> add 晴天", c.action == "add" and c.song == "晴天", f"{c.action}/{c.song}")
     c = p.parse("点歌")
     check("只有前缀 -> add 空歌名", c.action == "add" and c.song == "", f"{c.action}/{c.song!r}")
+    # 切歌功能整个去掉了：不再识别为指令，会被当成普通弹幕（点歌时就是歌名）
     c = p.parse("切歌")
-    check("切歌 -> skip", c.action == "skip", c.action)
+    check("「切歌」不再是指令（切歌已移除）", c.action == "none", c.action)
     c = p.parse("点歌 切歌")
-    check("点歌 切歌 -> skip", c.action == "skip", c.action)
+    check("「点歌 切歌」当成歌名", c.action == "add" and c.song == "切歌",
+          f"{c.action}/{c.song}")
     c = p.parse("我的点歌")
     check("我的点歌 -> query", c.action == "query", c.action)
     c = p.parse("取消点歌")
@@ -89,21 +91,15 @@ def test_commands() -> None:
     c = p.parse("主播今天好帅")
     check("普通弹幕 -> none", c.action == "none", c.action)
 
-    # 关掉切歌/查询/取消：关键词列表清空后这些指令必须失效
+    # 关掉查询/取消：关键词列表清空后这些指令必须失效
     cfg2 = Config.load(Path("__selftest_off.json"))
-    cfg2["danmaku"]["skip_keywords"] = []
     cfg2["danmaku"]["cancel_keywords"] = []
     cfg2["danmaku"]["query_keywords"] = []
     off = CommandParser(cfg2)
-    check("关掉后 切歌 -> none", off.parse("切歌").action == "none", off.parse("切歌").action)
-    check("关掉后 下一首 -> none", off.parse("下一首").action == "none")
     check("关掉后 我的点歌 -> none", off.parse("我的点歌").action == "none")
     check("关掉后 取消点歌 -> none", off.parse("取消点歌").action == "none")
     check("关掉后 点歌 稻香 仍可用",
           off.parse("点歌 稻香").action == "add" and off.parse("点歌 稻香").song == "稻香")
-    check("关掉后 点歌 切歌 当成歌名",
-          off.parse("点歌 切歌").action == "add" and off.parse("点歌 切歌").song == "切歌",
-          f"{off.parse('点歌 切歌').action}/{off.parse('点歌 切歌').song}")
     check("关掉后 点歌 我的点歌 当成歌名",
           off.parse("点歌 我的点歌").action == "add"
           and off.parse("点歌 我的点歌").song == "我的点歌",
@@ -1524,8 +1520,9 @@ async def test_playback_authority() -> None:
     await st.add("句号", "甲", 1)
     await st.add("起风了", "乙", 2)
     await st.add("孤勇者", "丙", 3)
-    check("默认 authority = netease",
-          str(cfg.get("playback.authority")) == "netease", str(cfg.get("playback.authority")))
+    check("authority 这个选项已经没了（只有「以播放器为准」一个行为）",
+          "authority" not in (cfg.as_dict().get("playback") or {}),
+          str(cfg.as_dict().get("playback")))
     check("默认不自动加歌（加歌由主播自己做）",
           cfg.get("netease.auto_add") is False, str(cfg.get("netease.auto_add")))
 
@@ -2063,6 +2060,166 @@ def test_probe(room_id: int) -> None:
         check("room_init 可用", False, repr(exc))
 
 
+async def test_no_skip_actions() -> None:
+    """切歌 / 手动"播完了" / 自动下一首 这些操作全部去掉了。
+
+    为什么去掉：
+      · 播放状态以播放器为准，这些操作改的是**点歌板自己的队列**，
+        下一轮对齐（_align_to_netease）就会把它纠正回来 —— 看着能用其实没用；
+      · 更糟的是"自动切歌"会调 play_now，等于替主播决定现在放什么。
+    现在的分工：**队列只负责把歌插到「下一首」**，放什么由主播在播放器里决定。
+    """
+    print("\n== 切歌类操作已移除 ==")
+    from pathlib import Path as P
+
+    root = P(__file__).resolve().parent
+
+    # 后端：不该再有这些接口/方法
+    main_src = (root / "songboard" / "main.py").read_text(encoding="utf-8")
+    web_src = (root / "songboard" / "webui.py").read_text(encoding="utf-8")
+    cfg_src = (root / "songboard" / "config.py").read_text(encoding="utf-8")
+    cmd_src = (root / "songboard" / "command.py").read_text(encoding="utf-8")
+
+    check("没有 /api/next 接口了", "/api/next" not in web_src)
+    check("没有 /api/mark_done 接口了", "/api/mark_done" not in web_src)
+    check("没有 /api/auto_next 接口了", "/api/auto_next" not in web_src)
+    check("没有 set_auto_next / mark_current_done 了",
+          "def set_auto_next" not in main_src
+          and "def mark_current_done" not in main_src)
+    check("命令解析里没有 skip 这个动作了",
+          '"skip"' not in cmd_src and "'skip'" not in cmd_src)
+    # 看**实际配置键**，不是源码文本 —— 源码注释里会提到这些名字
+    # （"这里没有 play_if_idle 了"），用文本匹配会误报。
+    from songboard.config import DEFAULT_CONFIG
+    flat: set[str] = set()
+
+    def walk(d, pre=""):
+        for k, v in d.items():
+            flat.add(pre + k)
+            if isinstance(v, dict):
+                walk(v, pre + k + ".")
+
+    walk(DEFAULT_CONFIG)
+    gone = {"danmaku.skip_keywords", "queue_only.play_if_idle",
+            "ncm_bridge.play_if_idle", "playback.authority",
+            "playback.fallback_to_board", "media.auto_next"}
+    check("配置里没有 skip_keywords / play_if_idle / authority / auto_next 了",
+          not (gone & flat), str(sorted(gone & flat)))
+
+    # 前端：按钮和开关都删了，而且**没有留下取不到元素的 JS**
+    page = (root / "web" / "control.html").read_text(encoding="utf-8")
+    for gone in ("btnNext", "btnDone", "btnSetDur", "durInput",
+                 "autoNext", "/api/next", "/api/mark_done", "/api/auto_next"):
+        check(f"控制台不再有 {gone}", gone not in page,
+              "" if gone not in page else "仍然存在")
+
+    # 真正会动播放器的地方：主流程不许调 bridge.play_now
+    # （注释里提到 play_now 不算 —— 那是在解释为什么删掉它）
+    check("插队列的流程里不再调 play_now",
+          "bridge.play_now" not in main_src,
+          "" if "bridge.play_now" not in main_src
+          else "还在调 play_now —— 那就是替主播决定放什么")
+
+    # 空闲时也照插不误（不再"空着就直接播"）
+    from songboard.config import Config
+    from songboard.main import App
+    import tempfile as _tempfile
+
+    tmp_dir = P(_tempfile.mkdtemp(prefix="songboard-noskip-"))
+    try:
+        p = tmp_dir / "config.json"
+        p.write_text(json.dumps({
+            "mode": "demo", "netease": {"enabled": False},
+            "ncm_bridge": {"enabled": True},
+            "update_check": {"enabled": False},
+        }, ensure_ascii=False), encoding="utf-8")
+        app = App(Config.load(p), persist=False)
+
+        calls: list[tuple] = []
+        app.bridge.available = lambda *a, **kw: True          # type: ignore
+        app.bridge.now_playing = lambda: None                 # type: ignore
+        app.bridge.insert_next = lambda sid: (calls.append(("insert", sid)),
+                                              (True, "ok"))[1]   # type: ignore
+        app.bridge.play_now = lambda sid: (calls.append(("PLAY", sid)),
+                                           (True, "ok"))[1]      # type: ignore
+
+        class FakeItem:
+            song = "起风了"
+
+        await app._queue_via_bridge(FakeItem(), 12345)
+        check("播放器空闲时也只插「下一首」，不起播",
+              [c[0] for c in calls] == ["insert"], str(calls))
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp_dir, ignore_errors=True)
+
+
+async def test_external_track_display() -> None:
+    """播放器在放**队列外**的歌时，点歌板要显示它（以播放器为准）。"""
+    print("\n== 播放器在放队列外的歌 ==")
+    from pathlib import Path as P
+
+    from songboard.config import Config
+    from songboard.main import App
+    from songboard.media import MediaInfo
+    import tempfile as _tempfile
+
+    tmp_dir = P(_tempfile.mkdtemp(prefix="songboard-ext-"))
+    try:
+        p = tmp_dir / "config.json"
+        p.write_text(json.dumps({
+            "mode": "demo", "netease": {"enabled": False},
+            "ncm_bridge": {"enabled": False},
+            "update_check": {"enabled": False},
+        }, ensure_ascii=False), encoding="utf-8")
+        app = App(Config.load(p), persist=False)
+        await app.store.add("起风了", "观众A", 1)
+
+        check("一开始没有外部曲目", app.external is None)
+        check("snapshot 里带 external 字段", "external" in app._snapshot())
+
+        # 播放器在放队列里的歌 → external 应为空
+        await app._align_to_netease(
+            MediaInfo(app="cloudmusic", title="起风了", playing=True))
+        check("播放器在放队列里的歌时，external 是空的", app.external is None,
+              str(app.external))
+
+        # 播放器换到队列外的歌 → 要记下来给前端显示
+        await app._align_to_netease(
+            MediaInfo(app="cloudmusic", title="阴天快乐", artist="陈奕迅",
+                      playing=True))
+        ext = app.external
+        check("播放器在放队列外的歌时，记进 external",
+              ext is not None and ext.get("song") == "阴天快乐", str(ext))
+        check("external 带艺人（有就给）", ext.get("artist") == "陈奕迅", str(ext))
+        check("snapshot 里能看到它",
+              (app._snapshot().get("external") or {}).get("song") == "阴天快乐")
+
+        # 再切回队列里的歌 → 清掉
+        await app._align_to_netease(
+            MediaInfo(app="cloudmusic", title="起风了", playing=True))
+        check("播放器放回队列里的歌后，external 清空", app.external is None,
+              str(app.external))
+
+        # 队列空着、播放器在放别的 → 也要显示（不能因为没有队列就不显示）
+        await app.store.clear()
+        await app._align_to_netease(
+            MediaInfo(app="cloudmusic", title="晴天娃娃", playing=True))
+        check("点歌队列空着时也跟随播放器",
+              (app.external or {}).get("song") == "晴天娃娃", str(app.external))
+
+        # 前端两个页面都得处理 external
+        root = P(__file__).resolve().parent
+        for name in ("overlay.html", "control.html"):
+            page = (root / "web" / name).read_text(encoding="utf-8")
+            check(f"{name} 处理了 external", "snap.external" in page,
+                  "" if "snap.external" in page
+                  else "没处理 —— 播放队列外的歌会显示不出来")
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp_dir, ignore_errors=True)
+
+
 def test_bridge_inject() -> None:
     """控制台里点一下就能重新注入桥（以前只能去命令行跑脚本）。
 
@@ -2318,8 +2475,11 @@ def test_ncm_bridge() -> None:
     cfg = Config.load(_P(__file__).resolve().parent / "__selftest_config.json")
     check("ncm_bridge 配置默认关闭", cfg.get("ncm_bridge.enabled") is False)
     check("ncm_bridge 默认插到下一首", cfg.get("ncm_bridge.insert_next") is True)
-    check("ncm_bridge 默认空队列直接播放",
-          cfg.get("ncm_bridge.play_if_idle") is True)
+    # play_if_idle 已删除：队列空着时也不主动起播（"按不按播放"是主播的事）
+    check("ncm_bridge 没有 play_if_idle 了（不主动起播）",
+          "play_if_idle" not in (cfg.as_dict().get("ncm_bridge") or {})
+          and "play_if_idle" not in (cfg.as_dict().get("queue_only") or {}),
+          "配置里还有 play_if_idle")
 
 
 async def test_sync_playlist_regression() -> None:
@@ -3152,6 +3312,8 @@ def main() -> int:
     test_ncm_bridge()
     test_bridge_warning()
     test_bridge_inject()
+    asyncio.run(test_no_skip_actions())
+    asyncio.run(test_external_track_display())
     if args.probe:
         test_probe(args.probe)
     if args.live:

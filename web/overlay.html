@@ -141,14 +141,18 @@ function toast(text){
 }
 
 function render(snap){
-  const cur = snap.current;
+  // 播放状态以播放器为准：播放器在放一首**不在点歌队列里**的歌时
+  // （主播自己的歌单），显示那首 —— 否则叠加层会挂着上一首点歌，
+  // 观众看到的和实际在放的对不上。
+  const ext = snap.external;
+  const cur = ext ? {song: ext.song, user: '', external: true} : snap.current;
   const box = document.getElementById('current');
   const songEl = document.getElementById('currentSong');
   const byEl = document.getElementById('currentBy');
   if (cur){
     box.classList.remove('empty');
     songEl.textContent = cur.song;
-    byEl.textContent = cur.user ? '@' + cur.user : '';
+    byEl.textContent = ext ? '不在点歌队列' : (cur.user ? '@' + cur.user : '');
   } else {
     box.classList.add('empty');
     songEl.textContent = '等待点歌…';

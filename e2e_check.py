@@ -134,9 +134,7 @@ async def main() -> int:
     else:
         check("广播里带快照", False, "没有收到快照")
 
-    # 切歌 + 清空
-    res = post("/api/next", {"reason": "skip"})
-    check("切歌接口可用", bool(res.get("ok")), json.dumps(res, ensure_ascii=False)[:100])
+    # 清空队列（没有"切歌"接口了 —— 队列只插下一首，不主动切歌）
     res = post("/api/clear", {})
     check("清空接口可用", bool(res.get("ok")))
     _, raw = get("/api/state")

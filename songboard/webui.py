@@ -190,9 +190,6 @@ class BoardHandler(BaseHTTPRequestHandler):
                 ))
                 return self._send_json({"ok": result in ("ok", "queue_full"), "result": result,
                                         "item": item.to_dict()})
-            if parsed.path == "/api/next":
-                item = self._run_async(store.next(reason=str(body.get("reason", "skip"))))
-                return self._send_json({"ok": True, "current": item.to_dict() if item else None})
             if parsed.path == "/api/remove":
                 ok = self._run_async(store.remove(str(body.get("id", ""))))
                 return self._send_json({"ok": ok})
@@ -210,14 +207,9 @@ class BoardHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/extapi/probe":
                 res = self._run_async(self.ctx["extapi_probe"](str(body.get("url", ""))))
                 return self._send_json(res)
-            if parsed.path == "/api/auto_next":
-                self._run_async(self.ctx["set_auto_next"](bool(body.get("enabled", False))))
-                return self._send_json({"ok": True})
             if parsed.path == "/api/duration":
                 ok = self._run_async(self.ctx["set_duration"](float(body.get("seconds", 0) or 0)))
                 return self._send_json({"ok": ok})
-            if parsed.path == "/api/mark_done":
-                return self._send_json(self._run_async(self.ctx["mark_done"]()))
             if parsed.path == "/api/simulate":
                 # kind 允许模拟弹幕以外的付费事件（gift / guard / super_chat），
                 # 这样调"送礼物才能点歌"的门槛时不用真的去送礼
