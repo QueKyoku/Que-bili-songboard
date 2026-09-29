@@ -140,4 +140,13 @@ class QrLogin:
                 f"跳转链={self.hops}，Set-Cookie={set_cookies or '（一条都没有）'}，"
                 f"cookie jar={[c.name for c in self.jar] or '（空）'}，"
                 f"响应={str(res)[:200]}")
-        return code, STATUS_TEXT.get(code, f"接口返回 code={code}")
+        known = STATUS_TEXT.get(code)
+        if known:
+            return code, known
+        # ⚠️ 801/802/803/800 之外，网易云**确实会返回别的码**（实测见过 8821：
+        #    扫码扫重复了、或者这个码已经用过的时候会这样）。
+        #    这时既不能当"继续等"（会一直干等下去），也不能自己编一个说法，
+        #    所以把接口原话带上 —— "接口返回 code=8821" 对排查毫无帮助。
+        api_msg = str(res.get("message") or res.get("msg") or "").strip()
+        return code, (f"网易云返回了异常状态 {code}"
+                      + (f"：{api_msg}" if api_msg else "（接口没给说明）"))

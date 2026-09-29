@@ -254,7 +254,17 @@ class BoardHandler(BaseHTTPRequestHandler):
                 was = bool(self.ctx["config"].get("netease.enabled", False))
                 self.ctx["config"]["netease"]["enabled"] = enabled
                 if body.get("cookie"):
-                    self.ctx["config"]["netease"]["cookie"] = str(body["cookie"])
+                    # ⚠️ 必须规范化再用。用户很可能是把 F12 里
+                    #    「Copy request headers」的整行粘进来（带 `Cookie:` 前缀，
+                    #    甚至整块请求头）—— 原样存下去的话那个前缀会被当成
+                    #    cookie 的一部分发出去，结果就是"明明填了却说没登录"。
+                    from .cookies import build_cookie
+                    raw = str(body["cookie"])
+                    fixed = build_cookie(raw)
+                    self.ctx["config"]["netease"]["cookie"] = fixed or raw.strip()
+                    if fixed and fixed != raw.strip():
+                        self.ctx["log_change"](
+                            "cookie 已自动整理成规范格式（只留 MUSIC_U / __csrf 等必需字段）")
                 self.ctx["config"].save()
                 # 保存后立刻验一次 cookie，并把结果回给控制台 ——
                 # 不然主播只能盯着日志猜"我粘的 cookie 到底对不对"。

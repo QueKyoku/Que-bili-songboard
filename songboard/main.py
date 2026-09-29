@@ -27,7 +27,8 @@ from .giftgate import GiftLedger
 from .media import MediaInfo, played_track_ids, read_now_playing, similarity
 from .ncmbridge import NeteaseBridge
 from .netease import NeteaseAuthError, build_driver, search_song
-from .qrlogin import CONFIRMED, EXPIRED, QrLogin, qr_matrix, qrcode_available
+from .qrlogin import (CONFIRMED, EXPIRED, SCANNED, WAITING, QrLogin, qr_matrix,
+                      qrcode_available)
 from .store import QueueStore
 from .version_check import check as check_update
 from .version_check import initial as update_initial
@@ -1166,6 +1167,11 @@ class App:
             if code != self._qr_last_code:
                 self._qr_last_code = code
                 self.log(f"📱 扫码状态：{code} {msg}")
+                if code not in (WAITING, SCANNED, EXPIRED):
+                    # 没见过的码（实测见过 8821）：把完整响应留下来，
+                    # 否则这种状态永远查不清 —— 界面上只能显示一句话。
+                    self.log(f"📱 该状态的完整响应："
+                             f"{str(session.debug.get('result'))[:300]}")
             if code == EXPIRED:
                 self._qr = None          # 过期了，让前端点「重新生成」
             return {"ok": True, "done": False, "code": code, "message": msg}

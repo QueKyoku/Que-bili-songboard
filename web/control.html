@@ -207,6 +207,25 @@
                 <button id="btnQrAgain" class="ghost" type="button">重新生成</button>
                 <button id="btnQrClose" class="ghost" type="button">收起</button>
               </div>
+              <!-- 扫码被网易云风控拦掉时的兜底指引。这是第三方客户端的
+                   普遍情况（扫码授权后无反应 / 返回 8821），再扫多少次都一样，
+                   所以直接告诉用户走手动那条路。 -->
+              <div id="qrFallback" style="display:none;margin-top:10px;
+                   padding:10px 12px;background:var(--panel2);border-radius:8px;
+                   font-size:12px;line-height:1.7">
+                <b>扫码这条路被网易云的风控拦了</b> —— 第三方客户端普遍如此，
+                不是本程序的问题，再扫也一样。改用手动粘贴，一定可行：
+                <div style="margin-top:6px">
+                  1. 浏览器打开
+                  <a href="https://music.163.com" target="_blank" rel="noreferrer">music.163.com</a>
+                  并登录<br/>
+                  2. 按 <code>F12</code> → <b>Network</b> → 刷新页面 →
+                  点任意一个请求 → <b>Headers</b> → 复制 <code>Cookie:</code> 那一整行<br/>
+                  3. 粘进上面那个 cookie 输入框点「保存」——
+                  整行粘进来就行，程序会自己挑出需要的字段<br/>
+                  详细说明见 README 第九章。
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -482,6 +501,8 @@ async function startQrLogin(){
   if (!box) return;
   box.style.display = '';
   stopQrPolling();
+  const fb = $('#qrFallback');
+  if (fb) fb.style.display = 'none';   // 重新开始，收起上次的兜底提示
   msg.textContent = '正在生成二维码…';
   const r = await api('/api/qrcode/start', {});
   if (!r || !r.ok){
@@ -511,10 +532,23 @@ async function startQrLogin(){
     const tag = (s.code === undefined || s.code === null) ? '' : ` · code=${s.code}`;
     msg.textContent = (s.done ? (s.ok ? '✅ ' : '⚠️ ') : '') + s.message
                     + `（第 ${tries} 次${tag}）`;
-    // 停止轮询：成功 / 过期 / 出错
-    const stop = s.done || s.ok === false || s.code === 800;
+    // 停止轮询：成功 / 过期 / 出错 / **没见过的状态码**
+    // 最后一个不能漏：网易云会返回 801-803、800 之外的码（实测见过 8821，
+    // 扫重复了就是这个），当成"继续等"的话用户会一直干等下去。
+    const KNOWN = [800, 801, 802, 803];
+    const unknown = (s.code !== undefined && s.code !== null
+                     && KNOWN.indexOf(s.code) < 0);
+    const stop = s.done || s.ok === false || s.code === 800 || unknown;
     if (!stop) return;
     stopQrPolling();
+    if (unknown){
+      msg.textContent = `⚠️ ${s.message}`;
+      // 风控拦掉扫码时把"改用手动粘贴"的指引亮出来 ——
+      // 让用户一直点「重新生成」是没意义的
+      const fb = $('#qrFallback');
+      if (fb){ fb.style.display = ''; $('#qrBox').style.display = ''; }
+      return;
+    }
     if (s.done && s.ok){
       const who = (s.account && s.account.nickname) || '';
       logLine('✅ 扫码登录成功' + (who ? '：' + who : ''));
