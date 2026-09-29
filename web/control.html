@@ -489,17 +489,33 @@ async function startQrLogin(){
     return;
   }
   drawQr(r.matrix);
+  let tries = 0;
   msg.textContent = '等待扫码…（用手机网易云扫）';
   qrTimer = setInterval(async () => {
-    const s = await api('/api/qrcode/poll', {});
-    if (s && s.message){
-      msg.textContent = (s.done ? (s.ok ? '✅ ' : '⚠️ ') : '') + s.message;
+    tries++;
+    let s = {};
+    try {
+      s = await api('/api/qrcode/poll', {});
+    } catch (e) {
+      // ⚠️ 不能静默：fetch 失败时如果什么都不显示，用户看到的就是
+      //    "扫了码完全没反应"，根本不知道是前端还是后台的问题。
+      msg.textContent = `⚠️ 查询状态失败（第 ${tries} 次）：${e}`;
+      return;
     }
+    if (!s || !s.message){
+      msg.textContent = `等待扫码…（已查询 ${tries} 次，服务端没回内容）`;
+      return;
+    }
+    // 把查询次数和状态码都显示出来：这样"没反应"和"轮询没在跑"
+    // 一眼就能分开，也不用去翻日志
+    const tag = (s.code === undefined || s.code === null) ? '' : ` · code=${s.code}`;
+    msg.textContent = (s.done ? (s.ok ? '✅ ' : '⚠️ ') : '') + s.message
+                    + `（第 ${tries} 次${tag}）`;
     // 停止轮询：成功 / 过期 / 出错
-    const stop = !s || s.done || s.ok === false || s.code === 800;
+    const stop = s.done || s.ok === false || s.code === 800;
     if (!stop) return;
     stopQrPolling();
-    if (s && s.done && s.ok){
+    if (s.done && s.ok){
       const who = (s.account && s.account.nickname) || '';
       logLine('✅ 扫码登录成功' + (who ? '：' + who : ''));
       $('#qrBox').style.display = 'none';

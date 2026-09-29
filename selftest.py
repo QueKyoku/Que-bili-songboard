@@ -1365,13 +1365,28 @@ def test_qrlogin() -> None:
         check(f"code={code} 有人话说明", bool(QR.STATUS_TEXT.get(code)),
               QR.STATUS_TEXT.get(code, ""))
 
-    # 注入一个假的接口层：不联网也能把整条流程走一遍
+    # 注入一个假的接口层：不联网也能把整条流程走一遍。
+    # QrLogin 现在统一走 weapi_post_capture（带 cookie jar 的那个），
+    # 所以 start 和 poll 都由这一个假函数承担。
     calls: list = []
-    real_post, real_capture = QR.weapi_post, QR.weapi_post_capture
+    real_capture = QR.weapi_post_capture
+
+    # 前两次「等待扫码」，第三次「登录成功」并下发 Set-Cookie。
+    # weapi_post_capture 返回 (json, 所有 Set-Cookie 行, 跳转链)
+    seq = [({"code": 200, "unikey": "KEY-123"}, []),
+           ({"code": 801}, []),
+           ({"code": 802}, []),
+           ({"code": 803}, ["MUSIC_U=REALTOKEN; Path=/; HttpOnly",
+                            "__csrf=CSRFVAL; Path=/"])]
+
+    def fake_capture(path, payload, cookie="", **kw):         # type: ignore
+        calls.append((path, payload))
+        res, cookies = seq.pop(0)
+        return res, cookies, [200]
+
     try:
-        QR.weapi_post = lambda path, payload, cookie: (       # type: ignore
-            calls.append((path, payload)),
-            {"code": 200, "unikey": "KEY-123"})[1]
+        QR.weapi_post_capture = fake_capture
+
         s = QR.QrLogin()
         url = s.start()
         check("start() 拿到二维码内容",
@@ -1379,19 +1394,8 @@ def test_qrlogin() -> None:
         check("调的是 unikey 接口、type=1",
               calls and calls[0][0] == "/login/qrcode/unikey"
               and calls[0][1].get("type") == 1, str(calls[:1]))
-
-        # 前两次「等待扫码」，第三次「登录成功」并下发 Set-Cookie。
-        # weapi_post_capture 返回 (json, 所有 Set-Cookie 行, 跳转链)
-        seq = [({"code": 801}, []),
-               ({"code": 802}, []),
-               ({"code": 803}, ["MUSIC_U=REALTOKEN; Path=/; HttpOnly",
-                                "__csrf=CSRFVAL; Path=/"])]
-
-        def fake_capture(path, payload, cookie="", **kw):     # type: ignore
-            res, cookies = seq.pop(0)
-            return res, cookies, [200]
-
-        QR.weapi_post_capture = fake_capture
+        check("QrLogin 走的是带 cookie jar 的 opener（会话保持）",
+              s._opener is not None and len(list(s.jar)) >= 0)
 
         c1, m1 = s.poll()
         check("801 → 等待扫码", c1 == 801 and "等待扫码" in m1, f"{c1} {m1}")
@@ -1406,9 +1410,10 @@ def test_qrlogin() -> None:
               len(s.raw_headers) == 2, str(s.raw_headers))
 
         # 万一某个版本把凭据放在 body 的 cookie 字段里
-        seq = [({"code": 803, "cookie": {"MUSIC_U": "FROMBODY",
+        # （seq 是闭包读的，重新赋值即可给下一轮喂数据；每次都要先喂 start）
+        seq = [({"code": 200, "unikey": "K2"}, []),
+               ({"code": 803, "cookie": {"MUSIC_U": "FROMBODY",
                                          "__csrf": "X", "junk": "y"}}, [])]
-        QR.weapi_post_capture = fake_capture
         s2 = QR.QrLogin()
         s2.start()
         s2.poll()
@@ -1417,8 +1422,7 @@ def test_qrlogin() -> None:
               s2.cookie)
 
         # 过期是明确的失败，不该被当成"继续等"
-        QR.weapi_post_capture = lambda p, q, c="", **kw: (    # type: ignore
-            {"code": 800}, [], [200])
+        seq = [({"code": 200, "unikey": "K3"}, []), ({"code": 800}, [])]
         s3 = QR.QrLogin()
         s3.start()
         code, msg = s3.poll()
@@ -1433,7 +1437,6 @@ def test_qrlogin() -> None:
             raised = str(exc)
         check("没 start() 就 poll() 会明确报错", "start" in raised, raised)
     finally:
-        QR.weapi_post = real_post            # type: ignore
         QR.weapi_post_capture = real_capture  # type: ignore
 
     # 二维码矩阵：图形界面靠它画方块
@@ -1537,6 +1540,65 @@ def test_qr_cookie_redirect() -> None:
             q.weapi_post_capture = real
         check("803 但没凭据时明确报错（带跳转链和收到的 Set-Cookie）",
               "803" in err and "跳转链" in err, err[:150])
+    finally:
+        srv.shutdown()
+
+
+def test_qr_session_keep() -> None:
+    """扫码登录必须**保持同一个会话**（cookie jar）。
+
+    实测（2026-09）：控制台扫码之后"什么都不发生"，状态永远停在 801。
+    原因是每次请求都独立发出去、不带 cookie —— 而 unikey 是发给**会话**的，
+    轮询得带着同一份 cookie（NMTID 等）回去，否则服务端不认识这个 key。
+    从日志上看一切正常（请求全成功、全返回 801），特别难查。
+    """
+    print("\n== 扫码登录的会话保持 ==")
+    import http.cookiejar
+    import http.server
+    import threading
+    import urllib.request as ur
+
+    from songboard.netease import weapi_post_capture
+
+    seen: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append(self.headers.get("Cookie") or "")
+            body = b'{"code": 801}'
+            self.send_response(200)
+            self.send_header("Set-Cookie", "NMTID=first-visit; Path=/")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        jar = http.cookiejar.CookieJar()
+        opener = ur.build_opener(ur.HTTPCookieProcessor(jar))
+        weapi_post_capture("/a", {}, "", base=base, opener=opener)
+        weapi_post_capture("/b", {}, "", base=base, opener=opener)
+        check("第一次请求不带 cookie（还没拿到）", seen[0] == "", repr(seen[0]))
+        check("第二次请求带上了第一次下发的 cookie（会话保持住了）",
+              "NMTID=first-visit" in seen[1], repr(seen[1]))
+
+        # 对照：不传 opener（各自独立请求）就保持不住
+        seen.clear()
+        weapi_post_capture("/a", {}, "", base=base)
+        weapi_post_capture("/b", {}, "", base=base)
+        check("对照：不带 jar 时两次请求互不相干（复现原 bug）",
+              seen[1] == "", repr(seen[1]))
+
+        # QrLogin 用的就是带 jar 的 opener
+        from songboard.qrlogin import QrLogin
+        check("QrLogin 自带 cookie jar", isinstance(QrLogin().jar,
+                                                http.cookiejar.CookieJar))
     finally:
         srv.shutdown()
 
@@ -2197,6 +2259,7 @@ async def test_console_qrcode() -> None:
             def __init__(self):
                 self.cookie = ""
                 self.raw_headers = []
+                self.unikey = "fake-unikey-1234"
                 self.code = 801
 
             def start(self):
@@ -3493,6 +3556,7 @@ def main() -> int:
     test_bat_files()
     test_ps1_files()
     test_qr_cookie_redirect()
+    test_qr_session_keep()
     test_version_check()
     test_room_diagnostics()
     test_cookie_extract()

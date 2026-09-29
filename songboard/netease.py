@@ -168,14 +168,17 @@ _noredirect_opener = urllib.request.build_opener(_NoRedirect)
 
 def weapi_post_capture(path: str, payload: dict[str, Any], cookie: str = "",
                        *, base: str = "https://music.163.com",
-                       max_hops: int = 4
+                       max_hops: int = 4,
+                       opener: Any = None
                        ) -> tuple[dict, list[str], list[int]]:
     """POST 一次，**把跳转过程中每一跳的 Set-Cookie 都收下来**。
 
-    为什么需要单独一个函数：扫码登录成功时，网易云是用 `Set-Cookie` 把
-    MUSIC_U 下发的，而 `urlopen` 默认会跟着 302 走 —— **中间那一跳的响应头
-    就丢了**，最后拿到的响应里干干净净，看起来像"扫码成功了但没给凭据"。
-    实测（2026-09）：控制台扫码扫完拿不到 cookie，就是栽在这里。
+    为什么需要单独一个函数：`urlopen` 默认会跟着 302 走 —— **中间那一跳的
+    响应头就丢了**。扫码登录的凭据（MUSIC_U）是 Set-Cookie 下发的，
+    丢了就变成"扫码成功了但没给凭据"。
+
+    `opener` 可以传一个**自带 cookie jar** 的 opener（扫码登录必须这么做，
+    见 qrlogin.QrLogin：unikey 是发给会话的，轮询得带着同一份 cookie 回去）。
 
     返回 (解析出的 JSON, 所有 Set-Cookie 原始行, 每一跳的状态码)。
     `hops` 是给排错用的 —— 出问题时一眼能看出跳了几次、跳到哪。
@@ -187,8 +190,13 @@ def weapi_post_capture(path: str, payload: dict[str, Any], cookie: str = "",
         "Referer": f"{base}/",
         "Origin": base,
         "Content-Type": "application/x-www-form-urlencoded",
-        "Cookie": cookie,
     }
+    # ⚠️ 只有真的传了 cookie 才设这个头。写死一个空的 `Cookie: `
+    #    会把 cookie jar 自动带上的 cookie **整个覆盖掉** ——
+    #    那样"保持会话"就完全失效了（自检里专门有一条盯着这个）。
+    if cookie:
+        headers["Cookie"] = cookie
+    use = opener or _noredirect_opener
     set_cookies: list[str] = []
     hops: list[int] = []
     result: dict[str, Any] = {"code": -1, "raw": "（没有任何响应）"}
@@ -199,7 +207,7 @@ def weapi_post_capture(path: str, payload: dict[str, Any], cookie: str = "",
             method="POST" if body is not None else "GET")
         raw = ""
         try:
-            with _noredirect_opener.open(req, timeout=15) as resp:
+            with use.open(req, timeout=15) as resp:
                 hops.append(resp.status)
                 set_cookies += list(resp.headers.get_all("Set-Cookie") or [])
                 raw = resp.read().decode("utf-8", "replace")

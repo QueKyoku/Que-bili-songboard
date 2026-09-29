@@ -1,16 +1,24 @@
 """扫码登录的业务逻辑：拿 unikey → 轮询 → 拿到 cookie。
 
-单独抽出来是因为有两个入口要用：
+单独抽出来是因为有几个入口要用：
+  * 网页控制台（songboard/main.py 的 qrcode_start / qrcode_poll）
   * `tools/login_qrcode.py` —— 命令行版（终端画二维码）
   * `tools/扫码登录.pyw`     —— 图形界面版（由根目录的 扫码登录.bat 拉起）
-两边共用这一份，免得写两遍、改一处漏一处。
+共用这一份，免得写两遍、改一处漏一处。
+
+⚠️ **必须保持同一个会话**（cookie jar）：unikey 是发给那个会话的，
+后续轮询得带着同一份 cookie（NMTID 等）回去。不保持的话服务端不认识
+这个 key —— 表现是"扫了码，状态永远停在 801，什么都不发生"，
+而且从日志上看一切正常（请求都成功、返回都是 801）。
 """
 from __future__ import annotations
 
+import http.cookiejar
+import urllib.request
 from typing import Any
 
 from .cookies import build_cookie
-from .netease import weapi_post, weapi_post_capture
+from .netease import weapi_post_capture
 
 # 轮询返回的状态码
 WAITING = 801        # 还没扫
@@ -67,10 +75,19 @@ class QrLogin:
         self.hops: list[int] = []
         #: 上一次 poll 的原始材料（跳转链 / Set-Cookie / 接口返回），排错用
         self.debug: dict[str, Any] = {}
+        #: ⚠️ 整个扫码流程共用这一个 cookie jar —— unikey 和会话绑定，
+        #:    轮询不带同一份 cookie 的话服务端不认识它，状态永远停在 801。
+        self.jar = http.cookiejar.CookieJar()
+        self._opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.jar))
+
+    def _post(self, path: str, payload: dict[str, Any]) -> tuple[dict, list[str], list[int]]:
+        """走**带 cookie jar** 的 opener（会话保持的关键就在这）。"""
+        return weapi_post_capture(path, payload, "", opener=self._opener)
 
     def start(self) -> str:
         """申请一个二维码。返回二维码里应该编的 URL。"""
-        res = weapi_post("/login/qrcode/unikey", {"type": 1}, "")
+        res, _cookies, _hops = self._post("/login/qrcode/unikey", {"type": 1})
         key = str(res.get("unikey") or "")
         if not key:
             raise RuntimeError(f"没能拿到二维码凭据，接口返回：{res}")
@@ -85,16 +102,15 @@ class QrLogin:
         """查一次扫码状态。返回 (状态码, 给人看的一句话)。
 
         ⚠️ 判"成功"看的是**有没有真的拿到 MUSIC_U**，而不是只看 body 里的 code：
-        凭据是 `Set-Cookie` 下发的，而且可能挂在跳转链的中间那一跳上
-        （见 netease.weapi_post_capture，这里栽过一次）。
-        所以先找凭据，找到就算 803；找不到再看 body 的 code 是多少。
+        凭据是 Set-Cookie 下发的，而跳转或者接口改动都可能让 body 里没有 code，
+        但凭据其实已经拿到了。反过来，code 是 803 也可能一个凭据都没捞到。
         """
         if not self.unikey:
             raise RuntimeError("还没调用 start()")
 
         try:
-            res, set_cookies, hops = weapi_post_capture(
-                "/login/qrcode/client/login", {"type": 1, "key": self.unikey}, "")
+            res, set_cookies, hops = self._post(
+                "/login/qrcode/client/login", {"type": 1, "key": self.unikey})
         except Exception as exc:  # noqa: BLE001 —— 让上层能看到原因
             raise RuntimeError(f"查询扫码状态失败：{exc}") from exc
 
@@ -102,12 +118,15 @@ class QrLogin:
         self.hops = list(hops)
         self.debug = {"result": res, "set_cookies": set_cookies, "hops": hops}
 
-        # 凭据可能在这些地方：每一跳的 Set-Cookie、body 的 cookie 字段
+        # 凭据可能在这些地方：每一跳的 Set-Cookie、cookie jar、body 的 cookie 字段
         firsts = "; ".join(c.split(";", 1)[0].strip() for c in set_cookies)
+        from_jar = "; ".join(f"{c.name}={c.value}" for c in self.jar
+                             if c.name == "MUSIC_U" or c.name == "__csrf")
         body_cookie = res.get("cookie") or {}
         body_firsts = "; ".join(f"{k}={v}" for k, v in body_cookie.items()
                                 if isinstance(v, str) and v)
-        cookie = build_cookie(firsts) or build_cookie(body_firsts)
+        cookie = build_cookie(firsts) or build_cookie(from_jar) \
+            or build_cookie(body_firsts)
 
         if cookie and "MUSIC_U" in cookie:
             self.cookie = cookie
@@ -119,5 +138,6 @@ class QrLogin:
             raise RuntimeError(
                 f"手机那边显示登录成功（803），但没收到登录凭据。"
                 f"跳转链={self.hops}，Set-Cookie={set_cookies or '（一条都没有）'}，"
+                f"cookie jar={[c.name for c in self.jar] or '（空）'}，"
                 f"响应={str(res)[:200]}")
         return code, STATUS_TEXT.get(code, f"接口返回 code={code}")

@@ -148,6 +148,7 @@ class App:
         self._bridge_task: asyncio.Task | None = None
         #: 控制台上正在进行的扫码登录（见 qrcode_start / qrcode_poll）
         self._qr: QrLogin | None = None
+        self._qr_last_code: int | None = None
 
     # ---------- 日志与广播 ----------
     def log(self, text: str) -> None:
@@ -1139,7 +1140,8 @@ class App:
         except Exception as exc:  # noqa: BLE001 —— 网络问题不该让接口 500
             return {"ok": False, "message": f"生成二维码失败：{exc}"}
         self._qr = session
-        self.log("📱 控制台开始扫码登录网易云")
+        self._qr_last_code = None
+        self.log(f"📱 控制台开始扫码登录（凭据 {(session.unikey or '?')[:8]}…）")
         return {"ok": True, "matrix": matrix, "size": len(matrix), "url": url}
 
     async def qrcode_poll(self) -> dict[str, Any]:
@@ -1156,6 +1158,14 @@ class App:
             return {"ok": False, "done": False, "message": str(exc)[:400]}
 
         if code != CONFIRMED:
+            # ⚠️ 状态变化就写一条日志。扫码之后"什么都没发生"的时候，
+            #    日志里必须能区分出两种完全不同的情况：
+            #      · 一条都没有 → 前端根本没在轮询（页面/JS 的问题）
+            #      · 一直 801    → 轮询在跑，但服务端认为没人扫（二维码/凭据的问题）
+            #    没有这行日志的话只能靠猜。
+            if code != self._qr_last_code:
+                self._qr_last_code = code
+                self.log(f"📱 扫码状态：{code} {msg}")
             if code == EXPIRED:
                 self._qr = None          # 过期了，让前端点「重新生成」
             return {"ok": True, "done": False, "code": code, "message": msg}
