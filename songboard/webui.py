@@ -245,6 +245,11 @@ class BoardHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/qrcode/poll":
                 return self._send_json(
                     self._run_async(self.ctx["qrcode_poll"]()))
+            # 从本机浏览器读网易云凭据（比手动复制省事，也是目前唯一可靠的
+            # 自动方式 —— 扫码被网易云风控拦了）
+            if parsed.path == "/api/netease/from_browser":
+                return self._send_json(
+                    self._run_async(self.ctx["cookie_from_browser"]()))
             if parsed.path == "/api/netease/enable":
                 # ⚠️ 只允许开关"搜索/查时长"和 cookie。
                 # 歌单写入相关（auto_add / playlist_id）**故意不再暴露**：

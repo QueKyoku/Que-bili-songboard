@@ -20,13 +20,14 @@ from typing import Any
 from . import __version__
 from .bilibili import BilibiliDanmaku, DemoDanmaku
 from .bridge_inject import inject as inject_bridge
+from .browser_cookie import read as read_browser_cookie
 from .command import CommandParser
 from .config import Config
 from .extapi import ExtApiSource
 from .giftgate import GiftLedger
 from .media import MediaInfo, played_track_ids, read_now_playing, similarity
 from .ncmbridge import NeteaseBridge
-from .netease import NeteaseAuthError, build_driver, search_song
+from .netease import NeteaseAuthError, account_info, build_driver, search_song
 from .qrlogin import (CONFIRMED, EXPIRED, SCANNED, WAITING, QrLogin, qr_matrix,
                       qrcode_available)
 from .store import QueueStore
@@ -1194,6 +1195,34 @@ class App:
         return {"ok": ok, "done": True, "message": result,
                 "account": self.driver.status().get("account")}
 
+    async def cookie_from_browser(self) -> dict[str, Any]:
+        """从本机浏览器里读网易云凭据 —— 验证过、有效才写进配置。
+
+        为什么这是首选方式：手动 F12 复制麻烦，扫码又被网易云风控拦了
+        （8821）。而浏览器里你本来就是登录状态，直接读出来最省事。
+        只读 music.163.com 的那几个必需字段，别的什么都不碰（见 browser_cookie）。
+        """
+        res = await asyncio.to_thread(read_browser_cookie)
+        if not res.get("ok"):
+            return {"ok": False, "message": res.get("message", "没读到凭据")}
+
+        who = await asyncio.to_thread(account_info, str(res["cookie"]))
+        if not who.get("user_id"):
+            # 读到了但网易云不认 —— 多半是浏览器里那份也过期了
+            return {"ok": False,
+                    "message": f"从 {res['browser']} 读到了凭据，但网易云说它无效"
+                               f"（可能已经过期）。去浏览器里重新登录一次"
+                               f"music.163.com，再点这个按钮。"}
+
+        self.cfg["netease"]["cookie"] = res["cookie"]
+        self.cfg["netease"]["enabled"] = True
+        self.cfg.save()
+        ok, msg = await self.reload_netease()
+        self.log(f"🌐 已从 {res['browser']} 读取网易云凭据"
+                 f"（{who.get('nickname') or who.get('user_id')}）：{msg}")
+        return {"ok": ok, "message": msg, "browser": res["browser"],
+                "nickname": who.get("nickname") or "", "account": who}
+
     async def netease_test(self) -> dict[str, Any]:
         ok, msg = await self.driver.test()
         return {"ok": ok, "message": msg, **self.driver.status()}
@@ -1284,6 +1313,7 @@ class App:
             "netease_test": self.netease_test,
             "qrcode_start": self.qrcode_start,
             "qrcode_poll": self.qrcode_poll,
+            "cookie_from_browser": self.cookie_from_browser,
             "bridge_inject": self.bridge_inject,
             "simulate_danmaku": self.simulate_danmaku,
             "log_change": self.log,

@@ -72,7 +72,7 @@
     <h2 style="margin-bottom:8px">🔑 网易云没登录 <span class="grow"></span></h2>
     <div class="hint" style="margin-top:0" id="cookieMsg"></div>
     <div class="row" style="margin-top:10px">
-      <button class="primary" id="btnQrFromBar" type="button">📱 扫码登录</button>
+      <button class="primary" id="btnFromBrowserBar" type="button">🌐 从浏览器读取</button>
       <span class="grow" id="cookieAction"></span>
     </div>
   </div>
@@ -188,8 +188,10 @@
         </div>
         <div class="row">
           <span class="tag" id="neStatus">未启用</span>
-          <button class="primary" id="btnQrLogin" type="button">📱 扫码登录</button>
+          <button class="primary" id="btnCookieFromBrowser" type="button">🌐 从浏览器读取</button>
+          <button class="ghost" id="btnQrLogin" type="button">📱 扫码登录</button>
         </div>
+        <div class="hint" id="neFromBrowserMsg"></div>
         <div class="hint" id="neHint"></div>
 
         <!-- 扫码登录：不在这里画出来，点了才出现 -->
@@ -461,13 +463,14 @@ function renderCookie(st){
   const msg = $('#cookieMsg');
   if (!ne.enabled) {
     msg.textContent = '网易云功能没启用 —— 观众点的歌搜不到、也插不进播放队列。'
-                    + '点下面的「扫码登录」，会自动启用并填好 cookie。';
+                    + '点下面的「🌐 从浏览器读取」，直接从你浏览器里的登录状态取凭据。';
   } else if (!ne.has_cookie) {
     msg.textContent = '还没填 cookie。没有它搜不到歌，歌就进不了播放队列。'
-                    + '用手机网易云扫一下下面的码，几秒就好。';
+                    + '点「🌐 从浏览器读取」——只要浏览器里登录过网易云，'
+                    + '一步就配好，不用手抄。';
   } else {
     msg.textContent = 'cookie 没能通过验证（可能已过期或被顶掉了）。'
-                    + '日志里写着具体原因；重新扫一次码即可。';
+                    + '去浏览器里重新登录一次 music.163.com，再点「🌐 从浏览器读取」。';
   }
 }
 
@@ -802,17 +805,48 @@ if (btnInject) {
   };
 }
 
+// 从浏览器读凭据：**首选**方式。浏览器里你本来就是登录状态，
+// 程序只读 music.163.com 的那几个必需字段（MUSIC_U / __csrf / NMTID）。
+// 扫码那条路被网易云风控拦了（8821），手动 F12 又麻烦，所以这个是主推。
+const btnFromBrowser = $('#btnCookieFromBrowser');
+if (btnFromBrowser) {
+  btnFromBrowser.onclick = async () => {
+    const btn = btnFromBrowser;
+    const line = $('#neFromBrowserMsg');
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = '读取中…';
+    line.textContent = '正在读浏览器里的网易云凭据…';
+    let r = {};
+    try {
+      r = await api('/api/netease/from_browser', {});
+    } catch (e) {
+      line.textContent = '⚠️ 读取失败：' + e;
+      btn.disabled = false; btn.textContent = old;
+      return;
+    }
+    line.textContent = (r.ok ? '✅ ' : '⚠️ ') + (r.message || '没读到');
+    if (r.ok && r.nickname) line.textContent = `✅ 已登录：${r.nickname}`;
+    logLine(line.textContent);
+    btn.disabled = false;
+    btn.textContent = old;
+    if (r.ok) $('#cookieBar').style.display = 'none';
+  };
+}
+
 // 扫码登录：卡片里的按钮和顶部提醒条上的按钮是同一件事
 const btnQr = $('#btnQrLogin');
 if (btnQr) {
   btnQr.onclick = startQrLogin;
-  $('#btnQrFromBar').onclick = startQrLogin;
   $('#btnQrAgain').onclick = startQrLogin;
   $('#btnQrClose').onclick = () => {
     $('#qrBox').style.display = 'none';
     stopQrPolling();
   };
 }
+// 顶部提醒条上那个按钮 = 卡片里的「从浏览器读取」（首选方式）
+const barBtn = $('#btnFromBrowserBar');
+if (barBtn && btnFromBrowser) barBtn.onclick = btnFromBrowser.onclick;
 // ---- 事件绑定 ----
 // "知道了"：同一个版本不再提醒（刷新页面也不弹，重开标签页才再提醒一次）
 $('#btnUpdateHide').onclick = () => {

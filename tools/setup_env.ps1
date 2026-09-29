@@ -50,7 +50,9 @@ $PipIndexes = @(
     @{ Name = "腾讯云";   Url = "https://mirrors.cloud.tencent.com/pypi/simple/" },
     @{ Name = "官方 PyPI"; Url = "https://pypi.org/simple/" }
 )
-$Deps = @("websockets", "cryptography", "qrcode")
+# rookiepy 是可选依赖：装了才能用控制台那个「从浏览器读取 cookie」，
+# 没装其它功能照样跑（见 songboard/browser_cookie.py）
+$Deps = @("websockets", "cryptography", "qrcode", "rookiepy")
 
 # ───────────────────────── 1. 已经有了吗 ─────────────────────────
 Step "1/5 检查现有环境"

@@ -2324,7 +2324,7 @@ async def test_console_qrcode() -> None:
         check("有 /api/qrcode/start", "/api/qrcode/start" in src)
         check("有 /api/qrcode/poll", "/api/qrcode/poll" in src)
         page = (root / "web" / "control.html").read_text(encoding="utf-8")
-        for el in ("btnQrLogin", "btnQrFromBar", "qrCanvas", "qrBox",
+        for el in ("btnQrLogin", "btnFromBrowserBar", "qrCanvas", "qrBox",
                    "cookieBar", "renderCookie", "drawQr"):
             check(f"控制台有 {el}", el in page, "" if el in page else "缺失")
         check("控制台把登录状态接进了 renderStatus", "renderCookie(st)" in page)
@@ -2490,6 +2490,147 @@ async def test_external_track_display() -> None:
             check(f"{name} 处理了 external", "snap.external" in page,
                   "" if "snap.external" in page
                   else "没处理 —— 播放队列外的歌会显示不出来")
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_browser_cookie() -> None:
+    """从浏览器读网易云凭据（控制台的「🌐 从浏览器读取」）。
+
+    为什么这是首选方式：手动 F12 复制麻烦，扫码**被网易云风控拦了**
+    （8821「请切换其他登录方式或升级新版本再试」，第三方客户端普遍如此）。
+
+    这里**不读真实 cookie、不打印任何值** —— 只验：
+      · 隐私边界（只查 music.163.com、只留几个必需字段）
+      · 各种失败路径都给人话，且永不抛异常
+      · 读到之后会先验证有效性才写配置
+    """
+    print("\n== 从浏览器读凭据 ==")
+    import tempfile as _tempfile
+
+    from songboard import browser_cookie as bc
+    from songboard.config import Config
+    from songboard.main import App
+    import songboard.main as m
+
+    # ---- 隐私边界：代码里就限死，不靠自觉 ----
+    check("只查 music.163.com 这一个域名",
+          bc.DOMAIN == "music.163.com", bc.DOMAIN)
+    check("只保留必需字段（MUSIC_U / __csrf / NMTID）",
+          set(bc.KEEP) == {"MUSIC_U", "__csrf", "NMTID"}, str(bc.KEEP))
+
+    # ---- 没装 rookiepy 时给人话 ----
+    real_read = bc.read
+    real_avail = bc.available
+    bc.available = lambda: False
+    try:
+        r = bc.read()
+    finally:
+        bc.available = real_avail
+    check("没装 rookiepy 时提示怎么装，而不是抛异常",
+          r.get("ok") is False and "rookiepy" in r.get("message", ""),
+          str(r)[:120])
+
+    # ---- 浏览器里没有凭据时的提示要说得清 ----
+    import sys
+    import types
+    fake = types.ModuleType("rookiepy")
+
+    def boom(domains):
+        raise RuntimeError("can't find cookies file")
+
+    fake.edge = boom
+    fake.chrome = boom
+    sys.modules["rookiepy"] = fake
+    try:
+        r2 = bc.read()
+    finally:
+        sys.modules.pop("rookiepy", None)
+    check("读不到时说清试过哪些浏览器、让用户先登录一次",
+          r2.get("ok") is False and "登录" in r2.get("message", "")
+          and "edge" in r2.get("message", ""), str(r2)[:160])
+
+    # ---- 读到了：只挑必需字段 ----
+    fake2 = types.ModuleType("rookiepy")
+
+    def ok_read(domains):
+        assert domains == ["music.163.com"], f"查了别的域名！{domains}"
+        return [{"name": "MUSIC_U", "value": "TOKEN123"},
+                {"name": "__csrf", "value": "CSRF"},
+                {"name": "NMTID", "value": "NM"},
+                {"name": "别的网站的字段", "value": "不该被带出来"}]
+
+    fake2.edge = ok_read
+    sys.modules["rookiepy"] = fake2
+    try:
+        r3 = bc.read()
+    finally:
+        sys.modules.pop("rookiepy", None)
+    check("读到了 MUSIC_U 就算成功", r3.get("ok") is True, str(r3))
+    check("只带出必需字段，其它字段一律丢掉",
+          "别的网站的字段" not in r3.get("cookie", "")
+          and set(r3.get("fields") or []) == {"MUSIC_U", "__csrf", "NMTID"},
+          str(r3.get("cookie")))
+
+    # ---- App 层：先验证有效性才写配置 ----
+    tmp_dir = Path(_tempfile.mkdtemp(prefix="songboard-bcookie-"))
+    try:
+        p = tmp_dir / "config.json"
+        p.write_text(json.dumps({
+            "mode": "demo", "netease": {"enabled": False, "cookie": ""},
+            "ncm_bridge": {"enabled": False},
+            "update_check": {"enabled": False},
+        }, ensure_ascii=False), encoding="utf-8")
+        app = App(Config.load(p), persist=False)
+
+        real_read_main = m.read_browser_cookie
+        real_acct = m.account_info
+
+        # (a) 读到了、但网易云说无效 → 不能写进配置
+        m.read_browser_cookie = lambda: {"ok": True, "cookie": "MUSIC_U=x",
+                                         "browser": "edge",
+                                         "fields": ["MUSIC_U"]}
+        m.account_info = lambda c: {}
+        try:
+            r = asyncio.run(app.cookie_from_browser())
+        finally:
+            m.read_browser_cookie, m.account_info = real_read_main, real_acct
+        check("凭据无效时拒绝写入，并让用户去浏览器重新登录",
+              r.get("ok") is False and "重新登录" in r.get("message", ""),
+              str(r)[:140])
+        check("确实没写进配置", not app.cfg.get("netease.cookie"),
+              str(app.cfg.get("netease.cookie")))
+
+        # (b) 有效 → 写进配置 + 立刻生效
+        m.read_browser_cookie = lambda: {"ok": True, "cookie": "MUSIC_U=good",
+                                         "browser": "edge",
+                                         "fields": ["MUSIC_U"]}
+        m.account_info = lambda c: {"nickname": "测试账号", "user_id": 42}
+        try:
+            r = asyncio.run(app.cookie_from_browser())
+        finally:
+            m.read_browser_cookie, m.account_info = real_read_main, real_acct
+        check("有效凭据写进配置", app.cfg.get("netease.cookie") == "MUSIC_U=good",
+              str(app.cfg.get("netease.cookie")))
+        check("并自动打开 netease.enabled",
+              app.cfg.get("netease.enabled") is True)
+        check("返回昵称给界面显示", r.get("nickname") == "测试账号", str(r)[:120])
+        check("落盘了（重启后还在）",
+              "MUSIC_U=good" in (tmp_dir / "config.json").read_text(
+                  encoding="utf-8"))
+
+        # ---- 接口与页面 ----
+        root = Path(__file__).resolve().parent
+        src = (root / "songboard" / "webui.py").read_text(encoding="utf-8")
+        check("有 /api/netease/from_browser（POST）",
+              'if parsed.path == "/api/netease/from_browser"' in src)
+        page = (root / "web" / "control.html").read_text(encoding="utf-8")
+        for el in ("btnCookieFromBrowser", "btnFromBrowserBar",
+                   "neFromBrowserMsg"):
+            check(f"控制台有 {el}", el in page, "" if el in page else "缺失")
+        check("横幅上的按钮指向同一个操作",
+              "$('#btnFromBrowserBar')" in page)
     finally:
         import shutil as _sh
         _sh.rmtree(tmp_dir, ignore_errors=True)
@@ -3589,6 +3730,7 @@ def main() -> int:
     test_ncm_bridge()
     test_bridge_warning()
     test_bridge_inject()
+    test_browser_cookie()
     asyncio.run(test_console_qrcode())
     asyncio.run(test_no_skip_actions())
     asyncio.run(test_external_track_display())
