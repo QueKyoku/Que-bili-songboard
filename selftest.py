@@ -2063,6 +2063,80 @@ def test_probe(room_id: int) -> None:
         check("room_init 可用", False, repr(exc))
 
 
+def test_bridge_warning() -> None:
+    """桥断线时的提示必须说清「歌哪儿都没进」，而且不能刷屏。
+
+    实测踩过（2026-09）：主播的网易云重启后桥失效（桥是注入进去的，
+    客户端一重启就没了），点歌时日志写的是
+    「ℹ️ 播放队列桥不可用，只写歌单（需手动点播放）」——
+    可 queue_only 模式（默认）下**根本不写歌单**，歌只留在点歌板自己的
+    队列里。主播照那句话去歌单里找，发现什么都没有，
+    最后只能来问「为什么进不去播放列表」。
+    """
+    print("\n== 桥断线时的提示 ==")
+    import tempfile as _tempfile
+
+    from songboard.config import Config
+    from songboard.main import App
+
+    class FakeItem:
+        song = "起风了"
+
+    tmp_dir = Path(_tempfile.mkdtemp(prefix="songboard-bridge-"))
+    try:
+        p = tmp_dir / "config.json"
+        p.write_text(json.dumps({
+            "mode": "demo",
+            "netease": {"enabled": False},
+            "ncm_bridge": {"enabled": True},
+            "update_check": {"enabled": False},
+        }, ensure_ascii=False), encoding="utf-8")
+        app = App(Config.load(p), persist=False)
+        app.bridge.available = lambda *a, **kw: False          # type: ignore
+        app.bridge.status = lambda: {"enabled": True, "available": False,
+                                     "message": "管道不存在"}    # type: ignore
+
+        before = len(app.log_lines)
+        asyncio.run(app._queue_via_bridge(FakeItem(), 12345))
+        text = " ".join(x["text"] for x in app.log_lines[before:])
+        check("桥断了会明确报出来", bool(text.strip()), "没写任何日志")
+        check("提示说清歌只留在点歌板队列里", "只在点歌板队列里" in text, text[:130])
+        check("不再说「只写歌单」（queue_only 下那是错的）",
+              "只写歌单" not in text, text[:130])
+        check("提示给出修复命令", "inject_bridge.py" in text, text[:130])
+
+        # 再点一首：同样的报错不该跟着点歌刷屏
+        before2 = len(app.log_lines)
+        asyncio.run(app._queue_via_bridge(FakeItem(), 12346))
+        check("同一状态不重复刷屏", len(app.log_lines) == before2,
+              f"又写了 {len(app.log_lines) - before2} 条")
+
+        # 桥恢复 → 正常插入；再断 → 要能重新提醒
+        app.bridge.available = lambda *a, **kw: True           # type: ignore
+        app.bridge.now_playing = lambda: {"track_id": "1"}     # type: ignore
+        app.bridge.insert_next = lambda sid: (True, "ok")      # type: ignore
+        asyncio.run(app._queue_via_bridge(FakeItem(), 12347))
+        check("桥恢复后正常插到下一首",
+              any("已插到下一首" in x["text"] for x in app.log_lines[before2:]),
+              str([x["text"] for x in app.log_lines[before2:]]))
+        app.bridge.available = lambda *a, **kw: False          # type: ignore
+        before3 = len(app.log_lines)
+        asyncio.run(app._queue_via_bridge(FakeItem(), 12348))
+        check("恢复之后再次断线会重新提醒", len(app.log_lines) > before3)
+
+        # 控制台得把桥状态显示出来 —— 桥断线是静默降级，
+        # 控制台不显示的话主播根本没处看
+        page = (Path(__file__).resolve().parent / "web" / "control.html"
+                ).read_text(encoding="utf-8")
+        for need in ("bridgeBar", "bridgeStateTag", "bridgeMsg", "renderBridge"):
+            check(f"控制台有 {need}", need in page,
+                  "" if need in page else "缺失")
+        check("桥状态接进了 renderStatus", "renderBridge(st)" in page)
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp_dir, ignore_errors=True)
+
+
 def test_ncm_bridge() -> None:
     """播放队列桥：协议编排、事件解码、不可用时的降级。
 
@@ -2980,6 +3054,7 @@ def main() -> int:
     asyncio.run(test_gift_cli_and_reload())
     asyncio.run(test_no_cookie_no_insert())
     test_ncm_bridge()
+    test_bridge_warning()
     if args.probe:
         test_probe(args.probe)
     if args.live:

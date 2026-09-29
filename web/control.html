@@ -65,6 +65,20 @@
 <div class="wrap">
   <h1><span>点歌板</span> 控制台</h1>
 
+  <!-- 播放队列桥没连上时顶上报警。这是"点歌根本没进网易云"的状态，
+       必须显眼：桥断了是静默降级，不看这里就完全不知道歌白点了。 -->
+  <div class="card" id="bridgeBar"
+       style="display:none;margin-bottom:14px;border-color:rgba(255,120,120,.55)">
+    <h2 style="margin-bottom:8px">❌ 点歌进不去网易云：播放队列桥没连上</h2>
+    <div class="hint" style="margin-top:0">
+      现在观众点的歌<b>只留在点歌板队列里</b>，网易云里什么都没有（不会进播放队列，也不会进歌单）。
+      最常见的原因是<b>网易云重启过</b> —— 桥是注入进去的，客户端一重启就没了。
+      重新注入一次即可恢复：
+      <code>python tools/inject_bridge.py</code>
+      <div style="margin-top:6px">桥的原始报错：<span id="bridgeMsg">—</span></div>
+    </div>
+  </div>
+
   <!-- 有新版本时顶上提醒。查不到（断网）时整条不显示，不会误导。 -->
   <div class="card" id="updateBar"
        style="display:none;margin-bottom:14px;border-color:rgba(255,204,85,.5)">
@@ -101,7 +115,7 @@
       </div>
 
       <div class="card" style="margin-top:16px">
-        <h2>播放 / 队列</h2>
+        <h2>播放 / 队列 <span class="tag" id="bridgeStateTag"></span></h2>
         <div class="now">
           <div class="label" id="nowSource">正在播放</div>
           <div class="t" id="nowTitle">—</div>
@@ -376,6 +390,33 @@ function renderState(snap){  const cur = snap.current;
 // 服务端查不到（断网、被 GitHub 限流）时给的是 checked=false，
 // 这时**什么都不显示** —— 不能因为查不到就写"已是最新"，那是骗人。
 // st.version 整个缺失也要当没事（比如浏览器缓存了旧页面配新服务端）。
+// ---- 播放队列桥 ----
+// 为什么要在控制台上显眼：桥断了是**静默降级** —— 点歌板照常跑、
+// 队列照常显示，只有网易云里什么都没有。主播不看这里就无从察觉，
+// 结果就是"观众点了半天歌，一首都没进播放列表"。
+function renderBridge(st){
+  const b = (st && st.ncm_bridge) || {};
+  const tag = $('#bridgeStateTag');
+  if (tag) {
+    if (!b.enabled) {
+      tag.textContent = '未启用';
+      tag.className = 'tag';
+    } else if (b.available) {
+      tag.textContent = `已连接 · 已插 ${b.inserted || 0} 首`;
+      tag.className = 'tag ok';
+    } else {
+      tag.textContent = '未连接';
+      tag.className = 'tag warn';
+    }
+  }
+  const bar = $('#bridgeBar');
+  if (!bar) return;
+  // 只在「开着但没连上」时报：没启用是主播自己的选择，不该报警
+  const broken = !!b.enabled && !b.available;
+  bar.style.display = broken ? '' : 'none';
+  if (broken) $('#bridgeMsg').textContent = b.message || '管道不存在';
+}
+
 function renderVersion(st){
   const v = (st && st.version) || {};
   const tag = $('#verTag');
@@ -398,6 +439,7 @@ function renderStatus(st){
   const dot = $('#connDot');
   dot.className = 'dot ' + (st.connected ? 'on' : 'off');
   renderVersion(st);
+  renderBridge(st);
   const room = st.room || {};
   // 房间名写进标签里：填错房间号时（填成别人的房间）连接一切正常、
   // 就是永远收不到弹幕 —— 把房间名亮出来一眼就能看出不对

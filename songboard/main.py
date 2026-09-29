@@ -133,6 +133,8 @@ class App:
         #: 所以查更新永远不会拖慢每 2 秒一次的状态轮询。
         self.version_state: dict[str, Any] = update_initial(__version__)
         self._update_task: asyncio.Task | None = None
+        #: 桥不可用的警告是否已经写过一次（避免观众每点一首就刷一条同样的报错）
+        self._bridge_warned = False
 
     # ---------- 日志与广播 ----------
     def log(self, text: str) -> None:
@@ -636,8 +638,21 @@ class App:
         """
         try:
             if not await asyncio.to_thread(self.bridge.available):
-                self.log("ℹ️ 播放队列桥不可用，只写歌单（需手动点播放）")
+                # ⚠️ 这里**不能**说"只写歌单，需手动点播放" ——
+                #    queue_only 模式（默认）下根本不写歌单，桥一断，
+                #    这首歌就只留在点歌板自己的队列里，网易云里什么都没有。
+                #    实测踩过：主播看到"只写歌单"以为去歌单点一下就有，
+                #    翻半天发现歌单里也是空的，只能来问"为什么进不去播放列表"。
+                #    所以：说清后果 + 给出修复命令（桥失效最常见的原因就是
+                #    网易云重启过），并且**只提醒一次**，别跟着点歌刷屏。
+                if not self._bridge_warned:
+                    self._bridge_warned = True
+                    self.log(
+                        f"❌ 点歌没能进网易云：《{item.song}》只在点歌板队列里，"
+                        f"播放队列桥没连上（{self.bridge.status().get('message', '')}）。"
+                        f"网易云一重启桥就失效，跑一次 tools/inject_bridge.py 即可恢复")
                 return
+            self._bridge_warned = False
 
             # 先看网易云到底在不在放歌
             state = await asyncio.to_thread(self.bridge.now_playing)
@@ -1076,7 +1091,9 @@ class App:
             if self.bridge.available(refresh_after=0.0):
                 self.log(f"⚡ 播放队列桥：{self.bridge.describe_safe()}")
             else:
-                self.log(f"⚠️ 播放队列桥不可用：{self.bridge.status()['message']}")
+                self.log(f"⚠️ 播放队列桥不可用：{self.bridge.status()['message']}"
+                         f" —— 点歌不会进网易云的播放队列，"
+                         f"跑一次 tools/inject_bridge.py 重新注入即可恢复")
         return ok, msg
 
     async def simulate_danmaku(self, text: str, user: str = "测试观众",
