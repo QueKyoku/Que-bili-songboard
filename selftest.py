@@ -2549,7 +2549,9 @@ def test_browser_cookie() -> None:
         sys.modules.pop("rookiepy", None)
     check("读不到时说清试过哪些浏览器、让用户先登录一次",
           r2.get("ok") is False and "登录" in r2.get("message", "")
-          and "edge" in r2.get("message", ""), str(r2)[:160])
+          and "Edge" in r2.get("message", ""), str(r2)[:160])
+    check("提示里不出现异常类名（RuntimeError 对用户没意义）",
+          "RuntimeError" not in r2.get("message", ""), str(r2)[:160])
 
     # ---- 读到了：只挑必需字段 ----
     fake2 = types.ModuleType("rookiepy")

@@ -29,6 +29,11 @@ BROWSERS = ("edge", "chrome", "brave", "firefox", "chromium", "vivaldi", "opera"
 #: 只留这几个 —— build_cookie 也是按这个白名单挑的
 KEEP = ("MUSIC_U", "__csrf", "NMTID")
 
+#: 提示里用中文名，别把 `edge` / RuntimeError 这种甩给用户看
+NAME_CN = {"edge": "Edge", "chrome": "Chrome", "brave": "Brave",
+           "firefox": "Firefox", "chromium": "Chromium",
+           "vivaldi": "Vivaldi", "opera": "Opera"}
+
 #: 只查这一个域名
 DOMAIN = "music.163.com"
 
@@ -46,7 +51,8 @@ def read(browsers: tuple[str, ...] = BROWSERS) -> dict[str, Any]:
     """挨个浏览器试，读到 MUSIC_U 就用它。
 
     **永远不抛异常**（控制台要拿返回值直接显示），失败时 message 里说清
-    "是哪个浏览器、因为什么没读到"，别只丢一句"失败了"。
+    "是哪个浏览器、因为什么没读到"，并且明确告诉用户
+    **去浏览器里从网页端登录一次** —— 那是最常见的失败原因。
     """
     if not available():
         return {"ok": False,
@@ -61,9 +67,10 @@ def read(browsers: tuple[str, ...] = BROWSERS) -> dict[str, Any]:
             continue
         try:
             items = fn([DOMAIN])
-        except Exception as exc:  # noqa: BLE001
-            # 没装这个浏览器 / 没有 profile / 读不了，都归到"换下一个试"
-            tried.append(f"{name}（{type(exc).__name__}）")
+        except Exception:  # noqa: BLE001
+            # 没装这个浏览器 / 没有 profile / 读不了，都归到"换下一个试"。
+            # 异常类名（RuntimeError 之类）对用户没意义，所以只说"读不到"。
+            tried.append(f"{NAME_CN.get(name, name)}（读不到）")
             continue
         raw = "; ".join(f"{c.get('name')}={c.get('value')}"
                         for c in items if c.get("name"))
@@ -72,9 +79,11 @@ def read(browsers: tuple[str, ...] = BROWSERS) -> dict[str, Any]:
             cookie = "; ".join(f"{k}={v}" for k, v in found.items() if k in KEEP)
             return {"ok": True, "cookie": cookie, "browser": name,
                     "fields": [k for k in found if k in KEEP]}
-        tried.append(f"{name}（里面没有网易云登录凭据）")
+        tried.append(f"{NAME_CN.get(name, name)}（没有网易云登录凭据）")
 
+    tried_text = "、".join(tried) if tried else "没有可读的浏览器"
     return {"ok": False,
-            "message": "没在浏览器里找到网易云的登录凭据。试过：" +
-                       ("、".join(tried) if tried else "没有可读的浏览器") +
-                       "。请先在浏览器里打开 music.163.com 登录一次，再回来点这个按钮。"}
+            "message": f"没在浏览器里找到网易云的登录凭据（试过：{tried_text}）。\n"
+                       f"解决：用你平时上网的那个浏览器打开 music.163.com，"
+                       f"从网页端登录一次（登录完不用管它，也不用关浏览器），"
+                       f"再回来点这个按钮。"}

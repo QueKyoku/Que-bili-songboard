@@ -5,6 +5,19 @@
 
 > ⚠️ 依赖 B 站弹幕长连接和网易云的**非官方接口**，接口一改就可能失效。
 
+## [0.7.1] - 2026-09-29
+
+### 变更
+
+- **README 第 9.1 节补上「用之前请看清楚这几点」**：cookie 等于登录态
+  （别把 `config.json` 发给别人、别打包进分享的 zip）、杀毒软件可能报警
+  （读浏览器 cookie 和窃密软件的行为很像，被拦是正常的）、这个功能依赖第三方库
+  `rookiepy`、不放心就用手动方式 —— 并且说明**三种方式拿到的 cookie 完全等价**。
+- **读不到凭据时的提示写得更明确**：会告诉你**试过哪些浏览器**，并让你
+  **用平时上网的那个浏览器打开 music.163.com，从网页端登录一次**
+  （登录完不用管它、也不用关浏览器），再回来点按钮。
+  cookie 读到了但网易云说无效时，也是同一套引导。
+
 ## [0.7.0] - 2026-09-29
 
 ### 新增
@@ -390,6 +403,7 @@
 - 仅支持 Windows（播放队列桥依赖进程注入与命名管道）。
 - 桥需要每次重新注入，网易云一重启就失效。
 
+[0.7.1]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.6.1...v0.6.2

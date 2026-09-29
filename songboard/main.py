@@ -1210,9 +1210,10 @@ class App:
         if not who.get("user_id"):
             # 读到了但网易云不认 —— 多半是浏览器里那份也过期了
             return {"ok": False,
-                    "message": f"从 {res['browser']} 读到了凭据，但网易云说它无效"
-                               f"（可能已经过期）。去浏览器里重新登录一次"
-                               f"music.163.com，再点这个按钮。"}
+                    "message": f"从 {res['browser']} 里读到了凭据，但网易云说它无效"
+                               f"（可能已经过期）。\n解决：用那个浏览器打开 "
+                               f"music.163.com，从网页端重新登录一次，"
+                               f"再回来点这个按钮。"}
 
         self.cfg["netease"]["cookie"] = res["cookie"]
         self.cfg["netease"]["enabled"] = True
