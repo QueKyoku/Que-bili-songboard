@@ -1068,8 +1068,14 @@ def test_bat_files() -> None:
         # 菜单里的中文要能读出来（防止整个文件被写坏）
         if bat.name == "启动.bat":
             for key in ("哔哩哔哩点歌板", "[1] 演示模式", "[2] 连直播间",
-                        "[3] 自检", "[4] 扫码登录"):
+                        "[3] 自检"):
                 check(f"启动.bat 里有「{key}」", key in text)
+            # 扫码登录已经从 bat 里挪到网页控制台了（bat 里不该再有这一步）
+            check("启动.bat 里没有扫码登录这一步了",
+                  "[4]" not in text and "扫码登录.bat" not in text,
+                  "还有残留 —— 扫码只该在控制台里")
+            check("启动.bat 告诉用户去控制台扫码",
+                  "控制台" in text and "扫码" in text)
 
         # 扫码登录的入口必须是 .bat：没装 Python 时 .pyw 双击根本不执行，
         # 所以"检查环境"这一步只能放在不需要 Python 的批处理里。
@@ -2058,6 +2064,126 @@ def test_probe(room_id: int) -> None:
         check("room_init 可用", res.get("code") == 0, f"code={res.get('code')} {res.get('message')}")
     except Exception as exc:
         check("room_init 可用", False, repr(exc))
+
+
+async def test_console_qrcode() -> None:
+    """控制台扫码登录：申请二维码 → 轮询 → 拿到 cookie 就写进配置。
+
+    803（手机上点确认）**没法自测** —— 要真人扫。所以这里把 QrLogin 换成假的，
+    验的是接口形状、状态处理、以及"成功时确实换了 cookie 并立刻生效"这条逻辑。
+    """
+    print("\n== 控制台扫码登录 ==")
+    import tempfile as _tempfile
+
+    from songboard.config import Config
+    from songboard.main import App
+    import songboard.main as m
+
+    tmp_dir = Path(_tempfile.mkdtemp(prefix="songboard-qr-"))
+    try:
+        p = tmp_dir / "config.json"
+        p.write_text(json.dumps({
+            "mode": "demo", "netease": {"enabled": False, "cookie": ""},
+            "ncm_bridge": {"enabled": False},
+            "update_check": {"enabled": False},
+        }, ensure_ascii=False), encoding="utf-8")
+        app = App(Config.load(p), persist=False)
+
+        # 没装 qrcode → 要说人话，而不是抛 ImportError
+        real_avail = m.qrcode_available
+        m.qrcode_available = lambda: False
+        try:
+            r = await app.qrcode_start()
+        finally:
+            m.qrcode_available = real_avail
+        check("没装 qrcode 时给出人话提示",
+              r.get("ok") is False and "qrcode" in r.get("message", ""),
+              str(r))
+
+        # 没生成二维码就轮询 → 明确说还没生成
+        r = await app.qrcode_poll()
+        check("没生成二维码时轮询给出提示",
+              r.get("ok") is False and "还没生成" in r.get("message", ""),
+              str(r))
+
+        # 正常路径：假的 QrLogin + 假矩阵（不打真接口）
+        class FakeQr:
+            def __init__(self):
+                self.cookie = ""
+                self.raw_headers = []
+                self.code = 801
+
+            def start(self):
+                return "https://music.163.com/login?codekey=fake"
+
+            def poll(self):
+                if self.code == 803:
+                    self.cookie = "MUSIC_U=fake_from_qr; __csrf=abc"
+                return self.code, {801: "等待扫码…", 803: "登录成功"}[self.code]
+
+        real_cls, real_matrix = m.QrLogin, m.qr_matrix
+        m.QrLogin = FakeQr
+        m.qr_matrix = lambda url, **kw: [[True, False], [False, True]]
+        try:
+            app._qr = None
+            r = await app.qrcode_start()
+            check("能生成二维码（矩阵交给前端画，不需要图片）",
+                  r.get("ok") is True and r.get("matrix")
+                  == [[True, False], [False, True]], str(r)[:120])
+            check("二维码内容指向网易云登录",
+                  str(r.get("url", "")).startswith("https://music.163.com/login"),
+                  str(r.get("url")))
+
+            r = await app.qrcode_poll()
+            check("801 → 还没扫完（done=False，继续轮询）",
+                  r.get("done") is False and r.get("code") == 801, str(r))
+
+            app._qr.code = 803                 # 模拟手机上点了确认
+            r = await app.qrcode_poll()
+        finally:
+            m.QrLogin, m.qr_matrix = real_cls, real_matrix
+
+        check("803 → done=True", r.get("done") is True, str(r))
+        check("扫码成功会把 cookie 写进配置",
+              "MUSIC_U=fake_from_qr" in str(app.cfg.get("netease.cookie")),
+              str(app.cfg.get("netease.cookie")))
+        check("并自动打开 netease.enabled",
+              app.cfg.get("netease.enabled") is True)
+        check("cookie 真的落盘了（重启后还在）",
+              "MUSIC_U=fake_from_qr" in (tmp_dir / "config.json").read_text(
+                  encoding="utf-8"))
+        check("用完即弃：轮询结束后不再持有扫码会话", app._qr is None)
+
+        # 拿到 803 却没有凭据 → 要报出来（这是没法自测那一步的兜底）
+        class EmptyQr(FakeQr):
+            def poll(self):
+                return 803, "登录成功"
+
+        m.QrLogin = EmptyQr
+        try:
+            await app.qrcode_start()
+            r = await app.qrcode_poll()
+        finally:
+            m.QrLogin = real_cls
+        check("803 但没解析出 cookie 时明确报错（并留原始响应头供排查）",
+              r.get("ok") is False and r.get("done") is False
+              and "没拿到登录凭据" in r.get("message", ""), str(r))
+
+        # 接口与页面
+        root = Path(__file__).resolve().parent
+        src = (root / "songboard" / "webui.py").read_text(encoding="utf-8")
+        check("有 /api/qrcode/start", "/api/qrcode/start" in src)
+        check("有 /api/qrcode/poll", "/api/qrcode/poll" in src)
+        page = (root / "web" / "control.html").read_text(encoding="utf-8")
+        for el in ("btnQrLogin", "btnQrFromBar", "qrCanvas", "qrBox",
+                   "cookieBar", "renderCookie", "drawQr"):
+            check(f"控制台有 {el}", el in page, "" if el in page else "缺失")
+        check("控制台把登录状态接进了 renderStatus", "renderCookie(st)" in page)
+        check("没登录时会提醒（横幅文案提到了扫码）",
+              "扫码登录" in page and "cookieBar" in page)
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp_dir, ignore_errors=True)
 
 
 async def test_no_skip_actions() -> None:
@@ -3312,6 +3438,7 @@ def main() -> int:
     test_ncm_bridge()
     test_bridge_warning()
     test_bridge_inject()
+    asyncio.run(test_console_qrcode())
     asyncio.run(test_no_skip_actions())
     asyncio.run(test_external_track_display())
     if args.probe:

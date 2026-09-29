@@ -27,6 +27,7 @@ from .giftgate import GiftLedger
 from .media import MediaInfo, played_track_ids, read_now_playing, similarity
 from .ncmbridge import NeteaseBridge
 from .netease import NeteaseAuthError, build_driver, search_song
+from .qrlogin import CONFIRMED, EXPIRED, QrLogin, qr_matrix, qrcode_available
 from .store import QueueStore
 from .version_check import check as check_update
 from .version_check import initial as update_initial
@@ -145,6 +146,8 @@ class App:
         self.bridge_state: dict[str, Any] = {"busy": False, "ok": None,
                                              "message": ""}
         self._bridge_task: asyncio.Task | None = None
+        #: 控制台上正在进行的扫码登录（见 qrcode_start / qrcode_poll）
+        self._qr: QrLogin | None = None
 
     # ---------- 日志与广播 ----------
     def log(self, text: str) -> None:
@@ -1118,6 +1121,61 @@ class App:
         return {"ok": False, "message": self.extapi.last_error or "没识别出曲名",
                 "top_keys": top_keys, "urls": self.extapi.urls}
 
+    # ---------- 控制台扫码登录 ----------
+    async def qrcode_start(self) -> dict[str, Any]:
+        """生成登录二维码，把矩阵交给控制台自己画。
+
+        为什么返回矩阵而不是图片：控制台用 Canvas 画方块就够了，不用装 Pillow
+        —— 少一个依赖，打包也小一圈（和扫码登录窗口是同一套做法，见 qrlogin.py）。
+        """
+        if not qrcode_available():
+            return {"ok": False,
+                    "message": "没装 qrcode 库，扫码用不了。"
+                               "在项目目录跑一次 pip install qrcode 就行。"}
+        try:
+            session = QrLogin()
+            url = await asyncio.to_thread(session.start)
+            matrix = await asyncio.to_thread(qr_matrix, url)
+        except Exception as exc:  # noqa: BLE001 —— 网络问题不该让接口 500
+            return {"ok": False, "message": f"生成二维码失败：{exc}"}
+        self._qr = session
+        self.log("📱 控制台开始扫码登录网易云")
+        return {"ok": True, "matrix": matrix, "size": len(matrix), "url": url}
+
+    async def qrcode_poll(self) -> dict[str, Any]:
+        """查一次扫码状态。手机上点了确认就立刻把 cookie 写进配置并生效。"""
+        session = self._qr
+        if session is None:
+            return {"ok": False, "done": False, "message": "还没生成二维码"}
+        try:
+            code, msg = await asyncio.to_thread(session.poll)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "done": False,
+                    "message": f"查询扫码状态失败：{exc}"}
+
+        if code != CONFIRMED:
+            if code == EXPIRED:
+                self._qr = None          # 过期了，让前端点「重新生成」
+            return {"ok": True, "done": False, "code": code, "message": msg}
+
+        cookie = (session.cookie or "").strip()
+        self._qr = None
+        if not cookie:
+            # 拿到 803 却没解析出凭据：把原始响应头留进日志便于定位
+            # （和扫码登录窗口一样的兜底，这步没法在本机自测）
+            self.log("⚠️ 扫码成功但没解析出 cookie；原始 Set-Cookie："
+                     + str(session.raw_headers)[:300])
+            return {"ok": False, "done": False,
+                    "message": "扫码成功了，但没拿到登录凭据 —— 看日志里的原始响应头。"}
+
+        self.cfg["netease"]["cookie"] = cookie
+        self.cfg["netease"]["enabled"] = True
+        self.cfg.save()
+        ok, result = await self.reload_netease()
+        self.log(("✅ 扫码登录成功：" if ok else "⚠️ 扫码拿到 cookie 但仍不可用：") + result)
+        return {"ok": ok, "done": True, "message": result,
+                "account": self.driver.status().get("account")}
+
     async def netease_test(self) -> dict[str, Any]:
         ok, msg = await self.driver.test()
         return {"ok": ok, "message": msg, **self.driver.status()}
@@ -1206,6 +1264,8 @@ class App:
             "set_mode": self.set_mode,
             "set_room": self.set_room,
             "netease_test": self.netease_test,
+            "qrcode_start": self.qrcode_start,
+            "qrcode_poll": self.qrcode_poll,
             "bridge_inject": self.bridge_inject,
             "simulate_danmaku": self.simulate_danmaku,
             "log_change": self.log,

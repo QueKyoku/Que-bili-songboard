@@ -65,6 +65,18 @@
 <div class="wrap">
   <h1><span>点歌板</span> 控制台</h1>
 
+  <!-- 没登录网易云时提醒。没 cookie 就搜不到歌 → 拿不到歌曲 id → 歌插不进播放队列，
+       等于核心功能失效，必须让主播一眼看到，并且能就地扫码修好。 -->
+  <div class="card" id="cookieBar"
+       style="display:none;margin-bottom:14px;border-color:rgba(255,204,85,.5)">
+    <h2 style="margin-bottom:8px">🔑 网易云没登录 <span class="grow"></span></h2>
+    <div class="hint" style="margin-top:0" id="cookieMsg"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" id="btnQrFromBar" type="button">📱 扫码登录</button>
+      <span class="grow" id="cookieAction"></span>
+    </div>
+  </div>
+
   <!-- 播放队列桥没连上时顶上报警。这是"点歌根本没进网易云"的状态，
        必须显眼：桥断了是静默降级，不看这里就完全不知道歌白点了。
        修复动作也做在这里 —— 让主播去命令行跑脚本是不现实的。 -->
@@ -176,8 +188,28 @@
         </div>
         <div class="row">
           <span class="tag" id="neStatus">未启用</span>
+          <button class="primary" id="btnQrLogin" type="button">📱 扫码登录</button>
         </div>
         <div class="hint" id="neHint"></div>
+
+        <!-- 扫码登录：不在这里画出来，点了才出现 -->
+        <div id="qrBox" style="display:none;margin-top:10px">
+          <div class="row" style="align-items:flex-start;gap:14px">
+            <canvas id="qrCanvas" width="220" height="220"
+                    style="background:#fff;border-radius:8px;padding:8px;flex:0 0 auto"></canvas>
+            <div class="grow">
+              <div id="qrMsg" style="font-size:13px;margin-bottom:8px">正在生成二维码…</div>
+              <div class="hint" style="margin-top:0">
+                用<b>手机网易云音乐 App</b> 扫这个码，然后在手机上点确认。<br/>
+                登录成功后会自动填好 cookie 并立刻生效，不用重启。
+              </div>
+              <div class="row" style="margin-top:8px">
+                <button id="btnQrAgain" class="ghost" type="button">重新生成</button>
+                <button id="btnQrClose" class="ghost" type="button">收起</button>
+              </div>
+            </div>
+          </div>
+        </div>
         <div class="hint">
           <b>cookie 只干两件事</b>：把歌名搜成歌曲 id、查歌时长。
           不填也能看点歌板，但歌<b>插不进网易云</b>（拿不到 id）。<br/>
@@ -292,6 +324,8 @@ let lastQueueKey = null;
 // 刷新页面不再弹，重开标签页才会再提醒一次）
 let updateSeen = '';
 try { updateSeen = sessionStorage.getItem('updateSeen') || ''; } catch (e) {}
+// 扫码登录的轮询计时器（见 startQrLogin）
+let qrTimer = null;
 
 function logLine(text){
   const el = document.getElementById('log');
@@ -392,6 +426,88 @@ function renderState(snap){  const cur = snap.current;
 // 服务端查不到（断网、被 GitHub 限流）时给的是 checked=false，
 // 这时**什么都不显示** —— 不能因为查不到就写"已是最新"，那是骗人。
 // st.version 整个缺失也要当没事（比如浏览器缓存了旧页面配新服务端）。
+// ---- 网易云登录状态 ----
+// 没有有效 cookie 就搜不到歌 → 拿不到歌曲 id → 歌插不进播放队列，
+// 也就是**核心功能失效**。所以没登录时必须显眼提醒，并且能就地扫码登录。
+function renderCookie(st){
+  const ne = (st && st.netease) || {};
+  const acc = ne.account || {};
+  const loggedIn = !!acc.user_id;
+  const bar = $('#cookieBar');
+  if (!bar) return;
+  // 登录好了就什么都不显示
+  const need = !loggedIn;
+  bar.style.display = need ? '' : 'none';
+  if (!need) return;
+  const msg = $('#cookieMsg');
+  if (!ne.enabled) {
+    msg.textContent = '网易云功能没启用 —— 观众点的歌搜不到、也插不进播放队列。'
+                    + '点下面的「扫码登录」，会自动启用并填好 cookie。';
+  } else if (!ne.has_cookie) {
+    msg.textContent = '还没填 cookie。没有它搜不到歌，歌就进不了播放队列。'
+                    + '用手机网易云扫一下下面的码，几秒就好。';
+  } else {
+    msg.textContent = 'cookie 没能通过验证（可能已过期或被顶掉了）。'
+                    + '日志里写着具体原因；重新扫一次码即可。';
+  }
+}
+
+// ---- 扫码登录 ----
+// 二维码是后端生成的**布尔矩阵**，这里用 Canvas 画方块 —— 不需要图片接口，
+// 也不需要 Pillow。做法和 tools/扫码登录.pyw 那个窗口一致。
+function drawQr(matrix){
+  const cv = $('#qrCanvas');
+  const ctx = cv.getContext('2d');
+  const n = matrix.length;
+  const size = cv.width;
+  const cell = Math.max(1, Math.floor(size / n));
+  const pad = Math.floor((size - cell * n) / 2);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = '#000';
+  for (let y = 0; y < n; y++){
+    for (let x = 0; x < n; x++){
+      if (matrix[y][x]) ctx.fillRect(pad + x*cell, pad + y*cell, cell, cell);
+    }
+  }
+}
+
+function stopQrPolling(){
+  if (qrTimer){ clearInterval(qrTimer); qrTimer = null; }
+}
+
+async function startQrLogin(){
+  const box = $('#qrBox');
+  const msg = $('#qrMsg');
+  if (!box) return;
+  box.style.display = '';
+  stopQrPolling();
+  msg.textContent = '正在生成二维码…';
+  const r = await api('/api/qrcode/start', {});
+  if (!r || !r.ok){
+    msg.textContent = '❌ ' + ((r && r.message) || '生成二维码失败');
+    return;
+  }
+  drawQr(r.matrix);
+  msg.textContent = '等待扫码…（用手机网易云扫）';
+  qrTimer = setInterval(async () => {
+    const s = await api('/api/qrcode/poll', {});
+    if (s && s.message){
+      msg.textContent = (s.done ? (s.ok ? '✅ ' : '⚠️ ') : '') + s.message;
+    }
+    // 停止轮询：成功 / 过期 / 出错
+    const stop = !s || s.done || s.ok === false || s.code === 800;
+    if (!stop) return;
+    stopQrPolling();
+    if (s && s.done && s.ok){
+      const who = (s.account && s.account.nickname) || '';
+      logLine('✅ 扫码登录成功' + (who ? '：' + who : ''));
+      $('#qrBox').style.display = 'none';
+    }
+  }, 1500);
+}
+
+
 // ---- 播放队列桥 ----
 // 为什么要在控制台上显眼：桥断了是**静默降级** —— 点歌板照常跑、
 // 队列照常显示，只有网易云里什么都没有。主播不看这里就无从察觉，
@@ -455,6 +571,7 @@ function renderStatus(st){
   dot.className = 'dot ' + (st.connected ? 'on' : 'off');
   renderVersion(st);
   renderBridge(st);
+  renderCookie(st);
   const room = st.room || {};
   // 房间名写进标签里：填错房间号时（填成别人的房间）连接一切正常、
   // 就是永远收不到弹幕 —— 把房间名亮出来一眼就能看出不对
@@ -632,6 +749,18 @@ if (btnInject) {
       btn.disabled = false;
       btn.textContent = '重新注入桥';
     }
+  };
+}
+
+// 扫码登录：卡片里的按钮和顶部提醒条上的按钮是同一件事
+const btnQr = $('#btnQrLogin');
+if (btnQr) {
+  btnQr.onclick = startQrLogin;
+  $('#btnQrFromBar').onclick = startQrLogin;
+  $('#btnQrAgain').onclick = startQrLogin;
+  $('#btnQrClose').onclick = () => {
+    $('#qrBox').style.display = 'none';
+    stopQrPolling();
   };
 }
 // ---- 事件绑定 ----

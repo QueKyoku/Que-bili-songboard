@@ -238,6 +238,13 @@ class BoardHandler(BaseHTTPRequestHandler):
                 # 等管道握手），进度和结果从 status 的 bridge_action 里读。
                 return self._send_json(
                     self._run_async(self.ctx["bridge_inject"]()))
+            # 控制台里扫码登录网易云（以前只能退出去双击 bat 跑一个窗口）
+            if parsed.path == "/api/qrcode/start":
+                return self._send_json(
+                    self._run_async(self.ctx["qrcode_start"]()))
+            if parsed.path == "/api/qrcode/poll":
+                return self._send_json(
+                    self._run_async(self.ctx["qrcode_poll"]()))
             if parsed.path == "/api/netease/enable":
                 # ⚠️ 只允许开关"搜索/查时长"和 cookie。
                 # 歌单写入相关（auto_add / playlist_id）**故意不再暴露**：
