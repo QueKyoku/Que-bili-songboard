@@ -19,6 +19,7 @@ from typing import Any
 
 from . import __version__
 from .bilibili import BilibiliDanmaku, DemoDanmaku
+from .bridge_inject import inject as inject_bridge
 from .command import CommandParser
 from .config import Config
 from .extapi import ExtApiSource
@@ -135,6 +136,11 @@ class App:
         self._update_task: asyncio.Task | None = None
         #: 桥不可用的警告是否已经写过一次（避免观众每点一首就刷一条同样的报错）
         self._bridge_warned = False
+        #: 控制台点「重新注入桥」的进行状态。注入要等十几秒（写内存 + 远程线程
+        #: + 等管道握手），不能卡住页面，所以放后台任务，状态从 status 里取。
+        self.bridge_state: dict[str, Any] = {"busy": False, "ok": None,
+                                             "message": ""}
+        self._bridge_task: asyncio.Task | None = None
 
     # ---------- 日志与广播 ----------
     def log(self, text: str) -> None:
@@ -1204,6 +1210,45 @@ class App:
         ok, msg = await self.driver.test()
         return {"ok": ok, "message": msg, **self.driver.status()}
 
+    async def bridge_inject(self) -> dict[str, Any]:
+        """控制台里点一下，把播放队列桥重新注入。
+
+        为什么要有：桥是注入进网易云的，**网易云一重启就没了**。以前只能去
+        命令行跑 `tools/inject_bridge.py`，主播开播前手忙脚乱根本不记得 ——
+        结果是"观众点了半天歌，一首都没进播放列表"。现在控制台那个红色横幅上
+        直接有按钮，点了就修。
+
+        注入本身要等十几秒（写远程内存 + 远程线程 + 等管道握手），所以**扔到
+        后台任务**里跑：HTTP 立刻返回，进度用 status 里的 bridge_action 显示。
+        """
+        if self._bridge_task is not None and not self._bridge_task.done():
+            return {"ok": False, "message": "正在注入中，稍等一下…", "busy": True}
+        self.bridge_state = {"busy": True, "ok": None, "message": "正在注入…"}
+        self._bridge_task = asyncio.create_task(self._run_bridge_inject())
+        return {"ok": True, "message": "开始注入，结果会写在日志里（最长十几秒）",
+                "busy": True}
+
+    async def _run_bridge_inject(self) -> None:
+        try:
+            # 注入是纯阻塞的 Win32 调用，必须扔线程里，否则整个事件循环
+            # （弹幕、队列、状态广播）都会卡住十几秒。
+            res = await asyncio.to_thread(inject_bridge)
+        except Exception as exc:  # noqa: BLE001 —— 绝不能让按钮把主程序带崩
+            res = {"ok": False, "message": f"注入过程出错：{exc!r}"}
+        ok = bool(res.get("ok"))
+        self.bridge_state = {"busy": False, "ok": ok,
+                             "message": str(res.get("message", ""))}
+        self.log(("✅ " if ok else "❌ ") + str(res.get("message", "")))
+        if ok:
+            try:
+                # ⚠️ 必须强制刷新：桥的可用性有 30 秒缓存，不清的话控制台
+                #    还会显示"未连接"，用户以为没成功又点一次。
+                await asyncio.to_thread(self.bridge.available,
+                                        refresh_after=0.0)
+                self._bridge_warned = False
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"⚠️ 桥状态刷新失败（已忽略）：{exc!r}")
+
     def status(self) -> dict[str, Any]:
         st = self.listener.status() if self.listener else {"mode": self._mode, "connected": False}
         st["mode"] = self._mode
@@ -1218,6 +1263,8 @@ class App:
         st["media"] = self.media_status()
         # 版本/更新状态：只回读缓存（真正的网络请求在 _check_update 里）
         st["version"] = self.version_state
+        # 桥的重注入进度：控制台按钮靠它显示"注入中…"和上次结果
+        st["bridge_action"] = dict(self.bridge_state)
         return st
 
     # ---------- 启停 ----------
@@ -1236,6 +1283,7 @@ class App:
             "set_mode": self.set_mode,
             "set_room": self.set_room,
             "netease_test": self.netease_test,
+            "bridge_inject": self.bridge_inject,
             "simulate_danmaku": self.simulate_danmaku,
             "log_change": self.log,
             "set_auto_next": self.set_auto_next,

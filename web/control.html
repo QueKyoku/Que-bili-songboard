@@ -66,17 +66,20 @@
   <h1><span>点歌板</span> 控制台</h1>
 
   <!-- 播放队列桥没连上时顶上报警。这是"点歌根本没进网易云"的状态，
-       必须显眼：桥断了是静默降级，不看这里就完全不知道歌白点了。 -->
+       必须显眼：桥断了是静默降级，不看这里就完全不知道歌白点了。
+       修复动作也做在这里 —— 让主播去命令行跑脚本是不现实的。 -->
   <div class="card" id="bridgeBar"
        style="display:none;margin-bottom:14px;border-color:rgba(255,120,120,.55)">
     <h2 style="margin-bottom:8px">❌ 点歌进不去网易云：播放队列桥没连上</h2>
     <div class="hint" style="margin-top:0">
       现在观众点的歌<b>只留在点歌板队列里</b>，网易云里什么都没有（不会进播放队列，也不会进歌单）。
-      最常见的原因是<b>网易云重启过</b> —— 桥是注入进去的，客户端一重启就没了。
-      重新注入一次即可恢复：
-      <code>python tools/inject_bridge.py</code>
-      <div style="margin-top:6px">桥的原始报错：<span id="bridgeMsg">—</span></div>
+      最常见的原因是<b>网易云重启过</b> —— 桥是注入进客户端的，客户端一重启就没了。
     </div>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" id="btnBridgeInject" type="button">重新注入桥</button>
+      <span class="grow" id="bridgeAction"></span>
+    </div>
+    <div class="hint">桥的原始报错：<span id="bridgeMsg">—</span></div>
   </div>
 
   <!-- 有新版本时顶上提醒。查不到（断网）时整条不显示，不会误导。 -->
@@ -411,9 +414,22 @@ function renderBridge(st){
   }
   const bar = $('#bridgeBar');
   if (!bar) return;
-  // 只在「开着但没连上」时报：没启用是主播自己的选择，不该报警
+  const act = (st && st.bridge_action) || {};
+  // 只在「开着但没连上」时报：没启用是主播自己的选择，不该报警。
+  // 注入进行中也要留着（否则一点按钮横幅就没了，看不到进度）。
   const broken = !!b.enabled && !b.available;
-  bar.style.display = broken ? '' : 'none';
+  bar.style.display = (broken || act.busy) ? '' : 'none';
+  const btn = $('#btnBridgeInject');
+  if (btn) {
+    btn.disabled = !!act.busy;
+    btn.textContent = act.busy ? '正在注入…' : '重新注入桥';
+  }
+  const line = $('#bridgeAction');
+  if (line) {
+    line.textContent = act.message || '';
+    line.style.color = act.ok === true ? 'var(--ok)'
+                     : (act.ok === false ? 'var(--warn)' : '');
+  }
   if (broken) $('#bridgeMsg').textContent = b.message || '管道不存在';
 }
 
@@ -602,6 +618,25 @@ function connect(){
   ws.onclose = () => setTimeout(connect, 1500);
 }
 
+// "重新注入桥"：网易云一重启桥就没了，这里点一下就能修好。
+// 注入要等十几秒，所以接口只是**发起**，进度和结果靠状态轮询回来。
+// ⚠️ 取不到元素就直接跳过：这类顶层绑定一旦抛异常，后面所有按钮都会失效
+//    （overlay 那个"整段 script 被丢弃"的坑就是这么来的）。
+const btnInject = $('#btnBridgeInject');
+if (btnInject) {
+  btnInject.onclick = async () => {
+    const btn = $('#btnBridgeInject');
+    btn.disabled = true;
+    btn.textContent = '正在注入…';
+    const r = await api('/api/bridge/inject');
+    if (r && r.message) logLine(r.message);
+    if (r && r.ok === false) {
+      // 连发起都失败（比如已经在注入中）—— 恢复按钮，别让它一直卡着
+      btn.disabled = false;
+      btn.textContent = '重新注入桥';
+    }
+  };
+}
 // ---- 事件绑定 ----
 // "知道了"：同一个版本不再提醒（刷新页面也不弹，重开标签页才再提醒一次）
 $('#btnUpdateHide').onclick = () => {

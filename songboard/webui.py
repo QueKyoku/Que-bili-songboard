@@ -238,6 +238,14 @@ class BoardHandler(BaseHTTPRequestHandler):
                 room = int(body.get("room_id", 0) or 0)
                 self._run_async(self.ctx["set_room"](room))
                 return self._send_json({"ok": True, "room_id": room})
+            # 重新注入播放队列桥（控制台那个红色横幅上的按钮）。
+            # 用 POST：它是有副作用的动作（往网易云进程里写内存），
+            # 放 GET 上会被预取/爬虫之类的意外触发。
+            if parsed.path == "/api/bridge/inject":
+                # 接口只是**发起**：真正的注入在后台任务里跑（要等十几秒
+                # 等管道握手），进度和结果从 status 的 bridge_action 里读。
+                return self._send_json(
+                    self._run_async(self.ctx["bridge_inject"]()))
             if parsed.path == "/api/netease/enable":
                 # ⚠️ 只允许开关"搜索/查时长"和 cookie。
                 # 歌单写入相关（auto_add / playlist_id）**故意不再暴露**：

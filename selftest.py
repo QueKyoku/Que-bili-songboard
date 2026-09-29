@@ -2063,6 +2063,102 @@ def test_probe(room_id: int) -> None:
         check("room_init 可用", False, repr(exc))
 
 
+def test_bridge_inject() -> None:
+    """控制台里点一下就能重新注入桥（以前只能去命令行跑脚本）。
+
+    桥是注入进网易云的，客户端一重启就没了。让主播开播前想起来跑脚本不现实，
+    所以修复动作也得在控制台上。这里验的是**这条链路**，绝不真注入 ——
+    那是往用户正在用的网易云进程里写内存。
+    """
+    print("\n== 控制台重新注入桥 ==")
+    import tempfile as _tempfile
+
+    from songboard import bridge_inject as bi
+    from songboard.config import Config
+    from songboard.main import App
+
+    # ---- 注入前的可行性检查（只读）----
+    pre = bi.check()
+    need = {"dll", "dll_exists", "dll_arch", "admin", "cloudmusic_pids",
+            "pid", "blocks"}
+    check("check() 给出诊断需要的字段", need <= set(pre), str(sorted(pre)))
+    check("check() 的 blocks 是列表（非空=现在注入一定失败）",
+          isinstance(pre["blocks"], list), str(pre["blocks"]))
+
+    # 缺 DLL 要给人话，而不是抛异常
+    bogus = str(Path("不存在的桥.dll"))
+    pre2 = bi.check(dll=bogus)
+    check("DLL 不存在时明确说出来",
+          any("找不到桥 DLL" in b for b in pre2["blocks"]), str(pre2["blocks"]))
+    r = bi.inject(dll=bogus)
+    check("inject() 永不抛异常，返回 ok=False + 原因",
+          r.get("ok") is False and "找不到桥 DLL" in r.get("message", ""),
+          str(r)[:160])
+
+    # ---- App 层：异步发起 + 重复点击保护 ----
+    tmp_dir = Path(_tempfile.mkdtemp(prefix="songboard-inject-"))
+    try:
+        p = tmp_dir / "config.json"
+        p.write_text(json.dumps({
+            "mode": "demo", "netease": {"enabled": False},
+            "ncm_bridge": {"enabled": True},
+            "update_check": {"enabled": False},
+        }, ensure_ascii=False), encoding="utf-8")
+
+        import songboard.main as m
+        real_inject = m.inject_bridge
+        # 绝不真注入：换成假的，顺便让桥状态探测也别去碰真客户端
+        m.inject_bridge = lambda *a, **kw: {"ok": True, "message": "假的注入结果"}
+        try:
+            async def scenario():
+                app = App(Config.load(p), persist=False)
+                app.bridge.available = lambda *a, **kw: True   # type: ignore
+                first = await app.bridge_inject()
+                second = await app.bridge_inject()     # 注入中再点一次
+                await app._bridge_task                 # 等后台任务跑完
+                return app, first, second
+            app, first, second = asyncio.run(scenario())
+        finally:
+            m.inject_bridge = real_inject
+
+        check("发起注入立刻返回 busy，不等它跑完",
+              first.get("busy") is True and first.get("ok") is True, str(first))
+        check("注入中再点会被拒绝（不会并发注入两次）",
+              second.get("ok") is False and "正在注入" in second.get("message", ""),
+              str(second))
+        check("跑完后状态里有结果",
+              app.bridge_state["busy"] is False
+              and app.bridge_state["ok"] is True
+              and "假的注入结果" in app.bridge_state["message"],
+              str(app.bridge_state))
+        check("结果同时写进日志（控制台日志面板能看到）",
+              any("假的注入结果" in x["text"] for x in app.log_lines),
+              str([x["text"] for x in app.log_lines][-2:]))
+        check("status() 里带 bridge_action（控制台靠它显示进度）",
+              "bridge_action" in app.status(), str(sorted(app.status())))
+        check("注入成功后会清掉桥状态缓存（否则控制台还显示未连接）",
+              app._bridge_warned is False, str(app._bridge_warned))
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp_dir, ignore_errors=True)
+
+    # ---- 接口与页面 ----
+    root = Path(__file__).resolve().parent
+    src = (root / "songboard" / "webui.py").read_text(encoding="utf-8")
+    check("接口 /api/bridge/inject 存在", "/api/bridge/inject" in src)
+    # GET 分支写成 `if route ==`，POST 分支写成 `if parsed.path ==`。
+    # 注入有副作用（往别的进程写内存），必须走 POST —— 放 GET 上会被
+    # 浏览器预取、爬虫之类的意外触发。
+    check("注入走 POST 而不是 GET",
+          'if parsed.path == "/api/bridge/inject"' in src,
+          "别放 GET")
+
+    page = (root / "web" / "control.html").read_text(encoding="utf-8")
+    for el in ("btnBridgeInject", "bridgeAction", "renderBridge"):
+        check(f"控制台有 {el}", el in page, "" if el in page else "缺失")
+    check("按钮受 busy 状态控制（注入中禁用并改文案）", "act.busy" in page)
+
+
 def test_bridge_warning() -> None:
     """桥断线时的提示必须说清「歌哪儿都没进」，而且不能刷屏。
 
@@ -3055,6 +3151,7 @@ def main() -> int:
     asyncio.run(test_no_cookie_no_insert())
     test_ncm_bridge()
     test_bridge_warning()
+    test_bridge_inject()
     if args.probe:
         test_probe(args.probe)
     if args.live:
