@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .cookies import cookies_from_response_headers
-from .netease import weapi_post, weapi_post_raw
+from .cookies import build_cookie
+from .netease import weapi_post, weapi_post_capture
 
 # 轮询返回的状态码
 WAITING = 801        # 还没扫
@@ -64,6 +64,9 @@ class QrLogin:
         self.url = ""
         self.cookie = ""
         self.raw_headers: list[str] = []
+        self.hops: list[int] = []
+        #: 上一次 poll 的原始材料（跳转链 / Set-Cookie / 接口返回），排错用
+        self.debug: dict[str, Any] = {}
 
     def start(self) -> str:
         """申请一个二维码。返回二维码里应该编的 URL。"""
@@ -75,25 +78,46 @@ class QrLogin:
         self.url = f"https://music.163.com/login?codekey={key}"
         self.cookie = ""
         self.raw_headers = []
+        self.hops = []
         return self.url
 
     def poll(self) -> tuple[int, str]:
-        """查一次扫码状态。返回 (状态码, 给人看的一句话)。"""
+        """查一次扫码状态。返回 (状态码, 给人看的一句话)。
+
+        ⚠️ 判"成功"看的是**有没有真的拿到 MUSIC_U**，而不是只看 body 里的 code：
+        凭据是 `Set-Cookie` 下发的，而且可能挂在跳转链的中间那一跳上
+        （见 netease.weapi_post_capture，这里栽过一次）。
+        所以先找凭据，找到就算 803；找不到再看 body 的 code 是多少。
+        """
         if not self.unikey:
             raise RuntimeError("还没调用 start()")
-        res, headers = weapi_post_raw("/login/qrcode/client/login",
-                                      {"type": 1, "key": self.unikey}, "")
-        code = int(res.get("code") or 0)
 
+        try:
+            res, set_cookies, hops = weapi_post_capture(
+                "/login/qrcode/client/login", {"type": 1, "key": self.unikey}, "")
+        except Exception as exc:  # noqa: BLE001 —— 让上层能看到原因
+            raise RuntimeError(f"查询扫码状态失败：{exc}") from exc
+
+        self.raw_headers = list(set_cookies)
+        self.hops = list(hops)
+        self.debug = {"result": res, "set_cookies": set_cookies, "hops": hops}
+
+        # 凭据可能在这些地方：每一跳的 Set-Cookie、body 的 cookie 字段
+        firsts = "; ".join(c.split(";", 1)[0].strip() for c in set_cookies)
+        body_cookie = res.get("cookie") or {}
+        body_firsts = "; ".join(f"{k}={v}" for k, v in body_cookie.items()
+                                if isinstance(v, str) and v)
+        cookie = build_cookie(firsts) or build_cookie(body_firsts)
+
+        if cookie and "MUSIC_U" in cookie:
+            self.cookie = cookie
+            return CONFIRMED, STATUS_TEXT[CONFIRMED]
+
+        code = int(res.get("code") or 0)
         if code == CONFIRMED:
-            # 凭据在 Set-Cookie 响应头里，不在 body
-            self.raw_headers = list(headers.get_all("Set-Cookie") or []) \
-                if headers else []
-            self.cookie = cookies_from_response_headers(headers)
-            if not self.cookie:
-                # 兜底：有些版本会把 cookie 放在 body 的 cookie 字段里
-                body_cookie = res.get("cookie") or {}
-                self.cookie = "; ".join(
-                    f"{k}={v}" for k, v in body_cookie.items()
-                    if k in ("MUSIC_U", "__csrf") and v)
+            # 803 但一个凭据都没捞到 —— 这是最糟的情况（用户以为成了）
+            raise RuntimeError(
+                f"手机那边显示登录成功（803），但没收到登录凭据。"
+                f"跳转链={self.hops}，Set-Cookie={set_cookies or '（一条都没有）'}，"
+                f"响应={str(res)[:200]}")
         return code, STATUS_TEXT.get(code, f"接口返回 code={code}")

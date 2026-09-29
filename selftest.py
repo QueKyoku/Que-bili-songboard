@@ -1365,13 +1365,9 @@ def test_qrlogin() -> None:
         check(f"code={code} 有人话说明", bool(QR.STATUS_TEXT.get(code)),
               QR.STATUS_TEXT.get(code, ""))
 
-    class FakeHeaders:
-        def __init__(self, items): self._items = items
-        def get_all(self, name): return self._items if name == "Set-Cookie" else None
-
     # 注入一个假的接口层：不联网也能把整条流程走一遍
     calls: list = []
-    real_post, real_raw = QR.weapi_post, QR.weapi_post_raw
+    real_post, real_capture = QR.weapi_post, QR.weapi_post_capture
     try:
         QR.weapi_post = lambda path, payload, cookie: (       # type: ignore
             calls.append((path, payload)),
@@ -1384,15 +1380,18 @@ def test_qrlogin() -> None:
               calls and calls[0][0] == "/login/qrcode/unikey"
               and calls[0][1].get("type") == 1, str(calls[:1]))
 
-        # 前两次「等待扫码」，第三次「登录成功」并下发 Set-Cookie
-        seq = [(801, None), (802, None), (803, [
-            "MUSIC_U=REALTOKEN; Path=/; HttpOnly",
-            "__csrf=CSRFVAL; Path=/",
-        ])]
-        def fake_raw(path, payload, cookie):                  # type: ignore
-            code, hdrs = seq.pop(0)
-            return {"code": code}, FakeHeaders(hdrs or [])
-        QR.weapi_post_raw = fake_raw
+        # 前两次「等待扫码」，第三次「登录成功」并下发 Set-Cookie。
+        # weapi_post_capture 返回 (json, 所有 Set-Cookie 行, 跳转链)
+        seq = [({"code": 801}, []),
+               ({"code": 802}, []),
+               ({"code": 803}, ["MUSIC_U=REALTOKEN; Path=/; HttpOnly",
+                                "__csrf=CSRFVAL; Path=/"])]
+
+        def fake_capture(path, payload, cookie="", **kw):     # type: ignore
+            res, cookies = seq.pop(0)
+            return res, cookies, [200]
+
+        QR.weapi_post_capture = fake_capture
 
         c1, m1 = s.poll()
         check("801 → 等待扫码", c1 == 801 and "等待扫码" in m1, f"{c1} {m1}")
@@ -1407,12 +1406,9 @@ def test_qrlogin() -> None:
               len(s.raw_headers) == 2, str(s.raw_headers))
 
         # 万一某个版本把凭据放在 body 的 cookie 字段里
-        seq = [(803, None)]
-        def fake_raw2(path, payload, cookie):                 # type: ignore
-            return ({"code": 803, "cookie": {"MUSIC_U": "FROMBODY",
-                                             "__csrf": "X", "junk": "y"}},
-                    FakeHeaders([]))
-        QR.weapi_post_raw = fake_raw2
+        seq = [({"code": 803, "cookie": {"MUSIC_U": "FROMBODY",
+                                         "__csrf": "X", "junk": "y"}}, [])]
+        QR.weapi_post_capture = fake_capture
         s2 = QR.QrLogin()
         s2.start()
         s2.poll()
@@ -1421,7 +1417,8 @@ def test_qrlogin() -> None:
               s2.cookie)
 
         # 过期是明确的失败，不该被当成"继续等"
-        QR.weapi_post_raw = lambda p, q, c: ({"code": 800}, FakeHeaders([]))  # type: ignore
+        QR.weapi_post_capture = lambda p, q, c="", **kw: (    # type: ignore
+            {"code": 800}, [], [200])
         s3 = QR.QrLogin()
         s3.start()
         code, msg = s3.poll()
@@ -1436,8 +1433,8 @@ def test_qrlogin() -> None:
             raised = str(exc)
         check("没 start() 就 poll() 会明确报错", "start" in raised, raised)
     finally:
-        QR.weapi_post = real_post        # type: ignore
-        QR.weapi_post_raw = real_raw     # type: ignore
+        QR.weapi_post = real_post            # type: ignore
+        QR.weapi_post_capture = real_capture  # type: ignore
 
     # 二维码矩阵：图形界面靠它画方块
     if QR.qrcode_available():
@@ -1453,6 +1450,95 @@ def test_qrlogin() -> None:
         check("左下角有定位图案", m[n - 3][2] and m[n - 3][3], "")
     else:
         print("  [SKIP] 没装 qrcode，跳过二维码矩阵检查")
+
+
+def test_qr_cookie_redirect() -> None:
+    """回归：扫码成功但拿不到 cookie —— 凭据挂在 302 那一跳上。
+
+    实测（2026-09）：控制台里扫码扫完，手机显示登录成功，程序却说没拿到凭据。
+    原因是 `urlopen` 会**自动跟跳转**，而 `Set-Cookie`（MUSIC_U）是挂在
+    **302 那一跳**的响应头里的 —— 中间响应头一丢，最后拿到的响应干干净净。
+
+    这里起个本地小服务器复现"凭据在跳转链上"，不依赖真接口。
+    """
+    print("\n== 扫码凭据在跳转链上 ==")
+    import http.server
+    import threading
+
+    from songboard.cookies import build_cookie
+    from songboard.netease import weapi_post_capture, weapi_post_raw
+    from songboard.qrlogin import QrLogin
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            # 第一跳：302 去别处，凭据就在这一跳的响应头里
+            self.send_response(302)
+            self.send_header("Set-Cookie", "MUSIC_U=fake_mu; Path=/; HttpOnly")
+            self.send_header("Set-Cookie", "__csrf=abc; Path=/")
+            self.send_header("Location", "/next")
+            self.end_headers()
+
+        def do_GET(self):
+            body = b'{"code": 803}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        _res, cookies, hops = weapi_post_capture(
+            "/login/qrcode/client/login", {"type": 1, "key": "x"}, "", base=base)
+        check("weapi_post_capture 收到了 302 那一跳的 Set-Cookie",
+              any("MUSIC_U" in c for c in cookies), str(cookies))
+        check("跳转链记下来了（302 → 200）", hops == [302, 200], str(hops))
+
+        # 对照：老做法（urlopen 自动跟跳转）拿不到凭据 —— 这就是原来失败的原因
+        _r2, hdrs2 = weapi_post_raw("/login/qrcode/client/login",
+                                    {"type": 1, "key": "x"}, "", base=base)
+        lost = list(hdrs2.get_all("Set-Cookie") or []) if hdrs2 else []
+        check("对照：自动跟跳转会丢掉凭据（复现原 bug）",
+              not any("MUSIC_U" in c for c in lost), str(lost))
+
+        # poll 要据此判成功（而不是只看 body 里的 code）
+        import songboard.qrlogin as q
+        real = q.weapi_post_capture
+        q.weapi_post_capture = lambda path, payload, cookie="", **kw: (
+            {"code": -1}, ["MUSIC_U=fake_mu; Path=/", "__csrf=abc; Path=/"],
+            [302, 200])
+        try:
+            s = QrLogin()
+            s.unikey = "fake"
+            code, _msg = s.poll()
+        finally:
+            q.weapi_post_capture = real
+        check("凭据在跳转链上时 poll 也判成功（803）", code == 803, str(code))
+        check("cookie 已拼好",
+              build_cookie(s.cookie) == "MUSIC_U=fake_mu; __csrf=abc", s.cookie)
+
+        # 803 却一个凭据都没捞到 → 明确报错，且带上排错需要的信息
+        q.weapi_post_capture = lambda path, payload, cookie="", **kw: (
+            {"code": 803}, [], [302, 200])
+        try:
+            s2 = QrLogin()
+            s2.unikey = "fake"
+            err = ""
+            try:
+                s2.poll()
+            except RuntimeError as exc:
+                err = str(exc)
+        finally:
+            q.weapi_post_capture = real
+        check("803 但没凭据时明确报错（带跳转链和收到的 Set-Cookie）",
+              "803" in err and "跳转链" in err, err[:150])
+    finally:
+        srv.shutdown()
 
 
 def test_ps1_files() -> None:
@@ -3406,6 +3492,7 @@ def main() -> int:
     test_web_js()
     test_bat_files()
     test_ps1_files()
+    test_qr_cookie_redirect()
     test_version_check()
     test_room_diagnostics()
     test_cookie_extract()

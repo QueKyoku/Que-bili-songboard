@@ -5,6 +5,20 @@
 
 > ⚠️ 依赖 B 站弹幕长连接和网易云的**非官方接口**，接口一改就可能失效。
 
+## [0.6.1] - 2026-09-29
+
+### 修复
+
+- **控制台扫码成功却拿不到 cookie**（0.6.0 引入）。凭据是 `Set-Cookie` 下发的，
+  而它挂在**跳转那一跳**（302）上 —— `urlopen` 默认会自动跟跳转，中间那个响应头
+  一丢，最后拿到的响应里只有 `NMTID`，看起来像"扫码成功了但没给凭据"。
+  对照实测：老代码在那个接口上收到的 `Set-Cookie` 里没有 `MUSIC_U`，
+  而手动跟跳转能收到。现在改成手动跟跳转、把每一跳的 `Set-Cookie` 都收下来；
+  判成功也改成**看有没有真的拿到 `MUSIC_U`**，而不是只看 body 里的 code。
+  万一还是没捞到，报错会带上跳转链、收到的 Set-Cookie 和接口原样返回 ——
+  803 那一步没法离线自测，只能靠这份诊断。
+  回归测试用本地小服务器复现了"凭据在跳转链上"，不依赖真接口。
+
 ## [0.6.0] - 2026-09-29
 
 ### 新增
@@ -305,6 +319,7 @@
 - 仅支持 Windows（播放队列桥依赖进程注入与命名管道）。
 - 桥需要每次重新注入，网易云一重启就失效。
 
+[0.6.1]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/QueKyoku/Que-bili-songboard/compare/v0.4.3...v0.4.4

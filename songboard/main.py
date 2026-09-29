@@ -1150,8 +1150,10 @@ class App:
         try:
             code, msg = await asyncio.to_thread(session.poll)
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "done": False,
-                    "message": f"查询扫码状态失败：{exc}"}
+            # ⚠️ 必须写日志：扫码失败的细节（跳转链、收到的 Set-Cookie、
+            #    接口原样返回）只有这里带得出来，界面上一行塞不下。
+            self.log(f"⚠️ 扫码登录失败：{exc}")
+            return {"ok": False, "done": False, "message": str(exc)[:400]}
 
         if code != CONFIRMED:
             if code == EXPIRED:

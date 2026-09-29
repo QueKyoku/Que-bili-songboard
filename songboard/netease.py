@@ -11,6 +11,7 @@ import json
 import os
 import random
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
@@ -125,13 +126,14 @@ def weapi_params(payload: dict[str, Any]) -> dict[str, str]:
 
 
 def weapi_post_raw(path: str, payload: dict[str, Any],
-                   cookie: str) -> tuple[dict, Any]:
+                   cookie: str, *,
+                   base: str = "https://music.163.com") -> tuple[dict, Any]:
     """和 weapi_post 一样，但**连响应头一起返回**。
 
-    扫码登录成功时网易云是通过 `Set-Cookie` 下发 MUSIC_U 的，body 里没有 ——
-    所以那一步必须能读到响应头。
+    ⚠️ 注意它用的是 `urlopen`，会**自动跟跳转** —— 中间那一跳的响应头会丢。
+    扫码登录要收 Set-Cookie，必须用 `weapi_post_capture`（它手动跟跳转）。
     """
-    url = f"https://music.163.com/weapi{path}"
+    url = f"{base}/weapi{path}"
     data = urllib.parse.urlencode(weapi_params(payload)).encode()
     headers = {
         "User-Agent": UA,
@@ -152,6 +154,79 @@ def weapi_post_raw(path: str, payload: dict[str, Any],
 
 def weapi_post(path: str, payload: dict[str, Any], cookie: str = "") -> dict:
     return weapi_post_raw(path, payload, cookie)[0]
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """不自动跟跳转 —— 我们要自己把每一跳的响应头收下来。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_noredirect_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def weapi_post_capture(path: str, payload: dict[str, Any], cookie: str = "",
+                       *, base: str = "https://music.163.com",
+                       max_hops: int = 4
+                       ) -> tuple[dict, list[str], list[int]]:
+    """POST 一次，**把跳转过程中每一跳的 Set-Cookie 都收下来**。
+
+    为什么需要单独一个函数：扫码登录成功时，网易云是用 `Set-Cookie` 把
+    MUSIC_U 下发的，而 `urlopen` 默认会跟着 302 走 —— **中间那一跳的响应头
+    就丢了**，最后拿到的响应里干干净净，看起来像"扫码成功了但没给凭据"。
+    实测（2026-09）：控制台扫码扫完拿不到 cookie，就是栽在这里。
+
+    返回 (解析出的 JSON, 所有 Set-Cookie 原始行, 每一跳的状态码)。
+    `hops` 是给排错用的 —— 出问题时一眼能看出跳了几次、跳到哪。
+    """
+    url = f"{base}/weapi{path}"
+    body: bytes | None = urllib.parse.urlencode(weapi_params(payload)).encode()
+    headers = {
+        "User-Agent": UA,
+        "Referer": f"{base}/",
+        "Origin": base,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Cookie": cookie,
+    }
+    set_cookies: list[str] = []
+    hops: list[int] = []
+    result: dict[str, Any] = {"code": -1, "raw": "（没有任何响应）"}
+
+    for _ in range(max(1, max_hops)):
+        req = urllib.request.Request(
+            url, data=body, headers=headers,
+            method="POST" if body is not None else "GET")
+        raw = ""
+        try:
+            with _noredirect_opener.open(req, timeout=15) as resp:
+                hops.append(resp.status)
+                set_cookies += list(resp.headers.get_all("Set-Cookie") or [])
+                raw = resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            # 3xx 也会走这里（因为我们不让它自动跟），正好能读到它的响应头
+            hops.append(exc.code)
+            set_cookies += list(exc.headers.get_all("Set-Cookie") or [])
+            if exc.code in (301, 302, 303, 307, 308):
+                loc = exc.headers.get("Location")
+                if not loc:
+                    break
+                url = urllib.parse.urljoin(url, loc)
+                if exc.code in (301, 302, 303):
+                    body = None        # 标准做法：302/303 之后改用 GET
+                continue
+            raw = exc.read().decode("utf-8", "replace")
+        except Exception as exc:  # noqa: BLE001
+            result = {"code": -1, "raw": f"{type(exc).__name__}: {exc}"}
+            break
+
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            result = {"code": -1, "raw": raw[:300]}
+        break
+
+    return result, set_cookies, hops
 
 
 def search_song(keyword: str, cookie: str = "", limit: int = 5) -> list[dict]:
